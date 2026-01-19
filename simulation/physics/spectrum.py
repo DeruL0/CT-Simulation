@@ -74,14 +74,9 @@ class SpectrumGenerator:
     }
     AL_DENSITY = 2.7  # g/cm³
     
-    def __init__(self, energy_bins: int = 140):
-        """
-        Initialize spectrum generator.
-        
-        Args:
-            energy_bins: Number of energy bins (1 keV each by default)
-        """
-        self.energy_bins = energy_bins
+    def __init__(self):
+        """Initialize spectrum generator."""
+        pass
     
     def generate(
         self,

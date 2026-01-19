@@ -157,13 +157,25 @@ class ParamsPanel(QWidget):
         # Tube voltage (kVp)
         kvp_row = QHBoxLayout()
         self._kvp_spin = QSpinBox()
-        self._kvp_spin.setRange(80, 140)
+        self._kvp_spin.setRange(40, 300)
         self._kvp_spin.setValue(120)
         self._kvp_spin.setSingleStep(10)
         self._kvp_spin.setSuffix(" kVp")
         self._kvp_spin.valueChanged.connect(self._on_param_changed)
         kvp_row.addWidget(self._kvp_spin)
         ct_layout.addRow("Tube Voltage:", kvp_row)
+        
+        # Tube current (mA)
+        ma_row = QHBoxLayout()
+        self._ma_spin = QSpinBox()
+        self._ma_spin.setRange(10, 1000)
+        self._ma_spin.setValue(200)
+        self._ma_spin.setSingleStep(50)
+        self._ma_spin.setSuffix(" mA")
+        self._ma_spin.setToolTip("Higher current = more photons = less noise")
+        self._ma_spin.valueChanged.connect(self._on_param_changed)
+        ma_row.addWidget(self._ma_spin)
+        ct_layout.addRow("Tube Current:", ma_row)
         
         layout.addWidget(ct_group)
         
@@ -250,9 +262,9 @@ class ParamsPanel(QWidget):
         physics_params_layout = QFormLayout(self._physics_params_widget)
         physics_params_layout.setContentsMargins(0, 0, 0, 0)
         
-        # kVp selection
+        # kVp selection (extended range)
         self._kvp_physics_combo = QComboBox()
-        self._kvp_physics_combo.addItems(["80", "100", "120", "140"])
+        self._kvp_physics_combo.addItems(["40", "60", "80", "100", "120", "140", "160", "180", "200", "250", "300"])
         self._kvp_physics_combo.setCurrentText("120")
         self._kvp_physics_combo.currentTextChanged.connect(self._on_param_changed)
         physics_params_layout.addRow("Tube Voltage:", self._kvp_physics_combo)
@@ -382,14 +394,11 @@ class ParamsPanel(QWidget):
         """Handle physics mode checkbox toggle."""
         enabled = state == Qt.Checked
         self._physics_params_widget.setVisible(enabled)
-        # Disable GPU mode when physics is on (physics uses skimage)
+        # Fast mode is not supported in physics mode (no skipping reconstruction)
         if enabled:
-            self._use_gpu_check.setChecked(False)
-            self._use_gpu_check.setEnabled(False)
             self._fast_mode_check.setChecked(False)
             self._fast_mode_check.setEnabled(False)
         else:
-            self._use_gpu_check.setEnabled(True)
             self._fast_mode_check.setEnabled(True)
         self.params_changed.emit()
     
@@ -459,6 +468,16 @@ class ParamsPanel(QWidget):
     def physics_energy_bins(self) -> int:
         """Get physics mode energy bin count."""
         return self._energy_bins_spin.value()
+    
+    @property
+    def physics_tube_current(self) -> int:
+        """Get tube current in mA (used by physics mode)."""
+        return self._ma_spin.value()
+    
+    @property
+    def tube_current(self) -> int:
+        """Get tube current in mA."""
+        return self._ma_spin.value()
     
     def update_memory_estimate(self, mesh_dimensions: tuple, num_faces: int = 0) -> None:
         """

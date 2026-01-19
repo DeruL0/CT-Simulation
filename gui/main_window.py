@@ -179,6 +179,32 @@ class MainWindow(QMainWindow):
         self._stl_panel.stl_loaded.connect(self._on_stl_loaded)
         self._params_panel.params_changed.connect(self._on_params_changed)
     
+    # ========== Helper Methods ==========
+    
+    def _create_progress_dialog(self, title: str) -> QProgressDialog:
+        """Create and configure a modal progress dialog."""
+        dialog = QProgressDialog(title, "Cancel", 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setCancelButton(None)  # Disable cancel (workers don't support interruption)
+        dialog.show()
+        return dialog
+    
+    def _close_progress_dialog(self) -> None:
+        """Close and clean up the progress dialog."""
+        if self._progress_dialog:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+    
+    def _show_error(self, title: str, message: str) -> None:
+        """Display an error message and restore UI state."""
+        self._close_progress_dialog()
+        self._simulate_btn.setEnabled(self._stl_loader is not None)
+        self._export_btn.setEnabled(self._ct_volume is not None)
+        self._status_bar.showMessage(f"Error: {message}")
+        QMessageBox.critical(self, title, f"An error occurred:\n\n{message}")
+    
     def _on_open_stl(self) -> None:
         """Handle File > Open STL."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -235,15 +261,7 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage("Running simulation...")
         
         # Create progress dialog
-        self._progress_dialog = QProgressDialog(
-            "Running CT Simulation...", "Cancel", 0, 100, self
-        )
-        self._progress_dialog.setWindowModality(Qt.WindowModal)
-        self._progress_dialog.setAutoClose(False)
-        self._progress_dialog.setAutoReset(False)
-        # Disable cancel for now as workers don't support safe interruption yet
-        self._progress_dialog.setCancelButton(None) 
-        self._progress_dialog.show()
+        self._progress_dialog = self._create_progress_dialog("Running CT Simulation...")
         
         # Create worker
         self._worker = SimulationWorker(
@@ -259,6 +277,7 @@ class MainWindow(QMainWindow):
             use_gpu=self._params_panel.use_gpu,
             physics_mode=self._params_panel.physics_mode,
             physics_kvp=self._params_panel.physics_kvp,
+            physics_tube_current=self._params_panel.physics_tube_current,
             physics_filtration=self._params_panel.physics_filtration,
             physics_energy_bins=self._params_panel.physics_energy_bins
         )
@@ -279,10 +298,8 @@ class MainWindow(QMainWindow):
         """Handle simulation completed."""
         self._ct_volume = ct_volume
         
-        if self._progress_dialog:
-            self._progress_dialog.close()
-            self._progress_dialog = None
-            
+        self._close_progress_dialog()
+        
         self._simulate_btn.setEnabled(True)
         self._export_btn.setEnabled(True)
         
@@ -343,18 +360,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_sim_error(self, error_msg: str) -> None:
         """Handle simulation error."""
-        if self._progress_dialog:
-            self._progress_dialog.close()
-            self._progress_dialog = None
-            
-        self._simulate_btn.setEnabled(True)
-        self._status_bar.showMessage(f"Error: {error_msg}")
-        
-        QMessageBox.critical(
-            self,
-            "Simulation Error",
-            f"An error occurred during simulation:\n\n{error_msg}"
-        )
+        self._show_error("Simulation Error", error_msg)
     
     def _on_export(self) -> None:
         """Export CT volume to DICOM."""
@@ -390,14 +396,7 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage("Exporting DICOM...")
         
         # Create progress dialog
-        self._progress_dialog = QProgressDialog(
-            "Exporting DICOM Series...", "Cancel", 0, 100, self
-        )
-        self._progress_dialog.setWindowModality(Qt.WindowModal)
-        self._progress_dialog.setAutoClose(False)
-        self._progress_dialog.setAutoReset(False)
-        self._progress_dialog.setCancelButton(None)
-        self._progress_dialog.show()
+        self._progress_dialog = self._create_progress_dialog("Exporting DICOM Series...")
         
         # Create worker
         self._worker = ExportWorker(
@@ -421,10 +420,8 @@ class MainWindow(QMainWindow):
     @Slot(list)
     def _on_export_finished(self, files: list) -> None:
         """Handle export completed."""
-        if self._progress_dialog:
-            self._progress_dialog.close()
-            self._progress_dialog = None
-            
+        self._close_progress_dialog()
+        
         self._simulate_btn.setEnabled(True)
         self._export_btn.setEnabled(True)
         
@@ -441,19 +438,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_export_error(self, error_msg: str) -> None:
         """Handle export error."""
-        if self._progress_dialog:
-            self._progress_dialog.close()
-            self._progress_dialog = None
-            
-        self._simulate_btn.setEnabled(True)
-        self._export_btn.setEnabled(True)
-        self._status_bar.showMessage(f"Export error: {error_msg}")
-        
-        QMessageBox.critical(
-            self,
-            "Export Error",
-            f"An error occurred during export:\n\n{error_msg}"
-        )
+        self._show_error("Export Error", error_msg)
 
     def _on_reset_stl(self) -> None:
         """Reset 3D view to show STL mesh."""

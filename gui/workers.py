@@ -64,6 +64,7 @@ class SimulationWorker(QThread):
         use_gpu: bool = False,
         physics_mode: bool = False,
         physics_kvp: int = 120,
+        physics_tube_current: int = 200,
         physics_filtration: float = 2.5,
         physics_energy_bins: int = 10
     ):
@@ -81,6 +82,7 @@ class SimulationWorker(QThread):
         # Physics mode
         self.physics_mode = physics_mode
         self.physics_kvp = physics_kvp
+        self.physics_tube_current = physics_tube_current
         self.physics_filtration = physics_filtration
         self.physics_energy_bins = physics_energy_bins
     
@@ -122,8 +124,10 @@ class SimulationWorker(QThread):
                 
                 physics_config = PhysicsConfig(
                     kvp=self.physics_kvp,
+                    tube_current_ma=self.physics_tube_current,
                     filtration_mm_al=self.physics_filtration,
-                    energy_bins=self.physics_energy_bins
+                    energy_bins=self.physics_energy_bins,
+                    use_gpu=self.use_gpu
                 )
                 
                 simulator = PhysicalCTSimulator(
