@@ -43,7 +43,8 @@ class ParamsPanel(QWidget):
             "Voxel Size (Manual)",
             "Octree Depth",
             "Target Resolution (Slice Size)",
-            "Target Slice Count"
+            "Target Slice Count",
+            "Target Resolution + Slices"
         ])
         self._res_strategy_combo.currentIndexChanged.connect(self._on_strategy_changed)
         strat_layout.addWidget(self._res_strategy_combo)
@@ -104,6 +105,30 @@ class ParamsPanel(QWidget):
         self._target_slices_spin.valueChanged.connect(self._on_target_slices_changed)
         layout_slices.addRow("Num Slices:", self._target_slices_spin)
         self._input_stack.addWidget(page_slices)
+        
+        # Page 4: Combined Target Resolution + Slices
+        page_combined = QWidget()
+        layout_combined = QFormLayout(page_combined)
+        layout_combined.setContentsMargins(0, 0, 0, 0)
+        self._combined_res_spin = QSpinBox()
+        self._combined_res_spin.setRange(32, 4096)
+        self._combined_res_spin.setValue(512)
+        self._combined_res_spin.setSingleStep(32)
+        self._combined_res_spin.setSuffix(" px")
+        self._combined_res_spin.valueChanged.connect(self._on_combined_changed)
+        layout_combined.addRow("Max Resolution (X/Y):", self._combined_res_spin)
+        
+        self._combined_slices_spin = QSpinBox()
+        self._combined_slices_spin.setRange(32, 4096)
+        self._combined_slices_spin.setValue(256)
+        self._combined_slices_spin.setSingleStep(16)
+        self._combined_slices_spin.valueChanged.connect(self._on_combined_changed)
+        layout_combined.addRow("Num Slices (Z):", self._combined_slices_spin)
+        
+        self._combined_info_label = QLabel("Voxel Size: -")
+        self._combined_info_label.setObjectName("secondaryLabel")
+        layout_combined.addRow("", self._combined_info_label)
+        self._input_stack.addWidget(page_combined)
         
         voxel_layout.addWidget(self._input_stack)
         
@@ -203,6 +228,58 @@ class ParamsPanel(QWidget):
         
         layout.addWidget(speed_group)
         
+        # Physics simulation settings
+        physics_group = QGroupBox("Physics Mode (Experimental)")
+        physics_layout = QVBoxLayout(physics_group)
+        
+        self._physics_mode_check = QCheckBox("Enable polychromatic physics")
+        self._physics_mode_check.setChecked(False)
+        self._physics_mode_check.setToolTip(
+            "Simulate realistic X-ray physics including:\n"
+            "• Polychromatic spectrum\n"
+            "• Energy-dependent attenuation\n"
+            "• Beam hardening artifacts\n"
+            "• Poisson noise\n\n"
+            "Note: Slower than simple mode."
+        )
+        self._physics_mode_check.stateChanged.connect(self._on_physics_toggle)
+        physics_layout.addWidget(self._physics_mode_check)
+        
+        # Physics parameters (hidden by default)
+        self._physics_params_widget = QWidget()
+        physics_params_layout = QFormLayout(self._physics_params_widget)
+        physics_params_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # kVp selection
+        self._kvp_physics_combo = QComboBox()
+        self._kvp_physics_combo.addItems(["80", "100", "120", "140"])
+        self._kvp_physics_combo.setCurrentText("120")
+        self._kvp_physics_combo.currentTextChanged.connect(self._on_param_changed)
+        physics_params_layout.addRow("Tube Voltage:", self._kvp_physics_combo)
+        
+        # Filtration
+        self._filtration_spin = QDoubleSpinBox()
+        self._filtration_spin.setRange(0.5, 10.0)
+        self._filtration_spin.setValue(2.5)
+        self._filtration_spin.setSingleStep(0.5)
+        self._filtration_spin.setDecimals(1)
+        self._filtration_spin.setSuffix(" mm Al")
+        self._filtration_spin.valueChanged.connect(self._on_param_changed)
+        physics_params_layout.addRow("Filtration:", self._filtration_spin)
+        
+        # Energy bins
+        self._energy_bins_spin = QSpinBox()
+        self._energy_bins_spin.setRange(5, 50)
+        self._energy_bins_spin.setValue(10)
+        self._energy_bins_spin.setToolTip("More bins = more accurate, slower")
+        self._energy_bins_spin.valueChanged.connect(self._on_param_changed)
+        physics_params_layout.addRow("Energy Bins:", self._energy_bins_spin)
+        
+        self._physics_params_widget.setVisible(False)
+        physics_layout.addWidget(self._physics_params_widget)
+        
+        layout.addWidget(physics_group)
+        
         # Stretch at bottom
         layout.addStretch()
     
@@ -233,6 +310,11 @@ class ParamsPanel(QWidget):
         """Handle target slices change."""
         self._recalc_voxel_size()
         self.params_changed.emit()
+    
+    def _on_combined_changed(self) -> None:
+        """Handle combined resolution + slices change."""
+        self._recalc_voxel_size()
+        self.params_changed.emit()
         
     def _recalc_voxel_size(self):
         """Recalculate and update voxel size based on strategy."""
@@ -260,6 +342,17 @@ class ParamsPanel(QWidget):
             # Add small padding factor or just straight division
             new_voxel_size = dims[2] / slices
             
+        elif strategy == 4:  # Combined Resolution + Slices
+            res = self._combined_res_spin.value()
+            slices = self._combined_slices_spin.value()
+            # Calculate voxel size from both constraints
+            voxel_from_xy = max(dims[0], dims[1]) / res
+            voxel_from_z = dims[2] / slices
+            # Use the tighter constraint (smaller voxel size)
+            new_voxel_size = min(voxel_from_xy, voxel_from_z)
+            # Update info label
+            self._combined_info_label.setText(f"Voxel Size: {new_voxel_size:.4f} mm")
+            
         # Update spinbox without triggering signal loop if possible
         # But we want to keep it consistent.
         # Actually, if we are in Manual mode, we don't update from calculation.
@@ -283,6 +376,21 @@ class ParamsPanel(QWidget):
         """Handle noise level slider change."""
         percent = value / 10.0
         self._noise_value_label.setText(f"{percent:.1f}%")
+        self.params_changed.emit()
+    
+    def _on_physics_toggle(self, state: int) -> None:
+        """Handle physics mode checkbox toggle."""
+        enabled = state == Qt.Checked
+        self._physics_params_widget.setVisible(enabled)
+        # Disable GPU mode when physics is on (physics uses skimage)
+        if enabled:
+            self._use_gpu_check.setChecked(False)
+            self._use_gpu_check.setEnabled(False)
+            self._fast_mode_check.setChecked(False)
+            self._fast_mode_check.setEnabled(False)
+        else:
+            self._use_gpu_check.setEnabled(True)
+            self._fast_mode_check.setEnabled(True)
         self.params_changed.emit()
     
     # Properties for accessing parameter values
@@ -332,14 +440,36 @@ class ParamsPanel(QWidget):
         """Get memory limit in GB."""
         return self._memory_limit_spin.value()
     
-    def update_memory_estimate(self, mesh_dimensions: tuple) -> None:
+    @property
+    def physics_mode(self) -> bool:
+        """Get physics mode setting."""
+        return self._physics_mode_check.isChecked()
+    
+    @property
+    def physics_kvp(self) -> int:
+        """Get physics mode tube voltage."""
+        return int(self._kvp_physics_combo.currentText())
+    
+    @property
+    def physics_filtration(self) -> float:
+        """Get physics mode filtration in mm Al."""
+        return self._filtration_spin.value()
+    
+    @property
+    def physics_energy_bins(self) -> int:
+        """Get physics mode energy bin count."""
+        return self._energy_bins_spin.value()
+    
+    def update_memory_estimate(self, mesh_dimensions: tuple, num_faces: int = 0) -> None:
         """
         Update the memory estimation display based on mesh dimensions.
         
         Args:
             mesh_dimensions: (width, height, depth) in mm
+            num_faces: Number of faces in the mesh (used for trimesh overhead estimation)
         """
         self._mesh_dims = mesh_dimensions  # Store for calculations
+        self._num_faces = num_faces  # Store for memory estimation
         self._recalc_voxel_size()  # Recalculate voxel size with new dims if needed
         if mesh_dimensions is None:
             self._memory_estimate_label.setText("Est. Memory: -")
@@ -351,10 +481,19 @@ class ParamsPanel(QWidget):
         # Calculate grid dimensions
         grid_shape = [int(d / voxel_size) + 4 for d in dims]  # +4 for padding
         total_voxels = grid_shape[0] * grid_shape[1] * grid_shape[2]
+        max_dim = max(grid_shape)
         
-        # Memory estimate (float32 = 4 bytes)
-        memory_bytes = total_voxels * 4
-        memory_gb = memory_bytes / (1024 ** 3)
+        # Memory estimate: output array + trimesh ray casting overhead
+        output_memory = total_voxels * 4  # float32 output
+        
+        # Trimesh internally allocates (num_faces * grid_resolution, 12) int64 arrays
+        if num_faces > 0:
+            ray_cast_memory = num_faces * max_dim * 12 * 8 * 2  # with safety factor
+            total_memory = output_memory + ray_cast_memory
+        else:
+            total_memory = output_memory
+        
+        memory_gb = total_memory / (1024 ** 3)
         
         # Check if exceeds limit
         limit_gb = self.memory_limit_gb

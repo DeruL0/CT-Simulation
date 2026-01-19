@@ -10,6 +10,14 @@ from .voxelizer import Voxelizer, VoxelGrid
 from .materials import MaterialDatabase, MaterialType, Material
 from .ct_simulator import CTSimulator, CTVolume
 
+# Physics simulation
+from .physics import (
+    PhysicalCTSimulator, 
+    PhysicsConfig,
+    SpectrumGenerator,
+    XRaySpectrum,
+)
+
 # Re-export from loaders for backwards compatibility
 from loaders.stl_loader import STLLoader, MeshInfo
 
@@ -23,4 +31,10 @@ __all__ = [
     "Material", 
     "CTSimulator",
     "CTVolume",
+    # Physics
+    "PhysicalCTSimulator",
+    "PhysicsConfig",
+    "SpectrumGenerator",
+    "XRaySpectrum",
 ]
+

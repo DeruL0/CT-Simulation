@@ -239,14 +239,15 @@ class MeshViewer(QWidget):
         if self._plotter is None:
             return
         
+        # Define view vectors as numeric arrays (x, y, z)
         views = {
-            "Isometric": "isometric",
-            "Front": "yz",
-            "Back": "-yz", 
-            "Left": "xz",
-            "Right": "-xz",
-            "Top": "xy",
-            "Bottom": "-xy"
+            "Isometric": (1, 1, 1),      # Isometric view
+            "Front": (0, -1, 0),         # Looking from front (negative Y)
+            "Back": (0, 1, 0),           # Looking from back (positive Y)
+            "Left": (-1, 0, 0),          # Looking from left (negative X)
+            "Right": (1, 0, 0),          # Looking from right (positive X)
+            "Top": (0, 0, 1),            # Looking from top (positive Z)
+            "Bottom": (0, 0, -1)         # Looking from bottom (negative Z)
         }
         
         if view_name in views:

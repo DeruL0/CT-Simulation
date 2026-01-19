@@ -96,25 +96,40 @@ class Voxelizer:
             Safe voxel size (may be larger than desired if memory limited)
         """
         extents = mesh.bounds[1] - mesh.bounds[0]
+        num_faces = len(mesh.faces)
         
-        # Calculate memory for desired voxel size
+        # Calculate output grid shape
         shape = np.ceil(extents / desired_voxel_size).astype(int) + 4
-        estimated_memory = int(np.prod(shape) * 4)  # float32 = 4 bytes
+        total_voxels = np.prod(shape)
+        
+        # Estimate memory: output array + trimesh intermediate arrays
+        # Trimesh internally uses (num_faces * grid_resolution, 12) int64 arrays for ray casting
+        # This is the main memory bottleneck
+        max_dim = int(np.max(shape))
+        # Ray casting allocates approximately: num_faces * max_dim * 12 * 8 bytes
+        ray_casting_memory = num_faces * max_dim * 12 * 8  # int64 = 8 bytes per element
+        output_memory = total_voxels * 4  # float32 output
+        
+        # Additional safety factor for other intermediate arrays
+        estimated_memory = ray_casting_memory * 2 + output_memory
         
         if estimated_memory <= self.max_memory_bytes:
             return desired_voxel_size
         
-        # Calculate minimum voxel size that fits in memory
-        # Volume = memory / 4 bytes
-        max_voxels = self.max_memory_bytes / 4
-        # Cubic root to get approximate dimension
-        max_dim = max_voxels ** (1/3)
-        
-        # Use the largest extent to calculate safe voxel size
+        # Calculate safe voxel size based on the tighter constraint
+        # For ray casting: num_faces * (max_extent / voxel_size) * 12 * 8 * 2 <= max_memory
+        # Solving for voxel_size: voxel_size >= (num_faces * max_extent * 12 * 8 * 2) / max_memory
         max_extent = np.max(extents)
-        safe_voxel_size = max_extent / (max_dim - 4)
+        safe_voxel_size_ray = (num_faces * 12 * 8 * 2 * max_extent) / self.max_memory_bytes
         
-        return max(safe_voxel_size, desired_voxel_size)
+        # For output: (extents / voxel_size)^3 * 4 <= max_memory
+        # Solving: voxel_size >= (extents^3 * 4 / max_memory)^(1/3)
+        volume = np.prod(extents)
+        safe_voxel_size_output = (volume * 4 / self.max_memory_bytes) ** (1/3)
+        
+        safe_voxel_size = max(safe_voxel_size_ray, safe_voxel_size_output, desired_voxel_size)
+        
+        return safe_voxel_size
     
     def voxelize(
         self, 

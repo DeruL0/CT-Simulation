@@ -86,6 +86,12 @@ class MainWindow(QMainWindow):
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._on_export)
         actions_layout.addWidget(self._export_btn)
+
+        self._reset_stl_btn = QPushButton("Reset to STL")
+        self._reset_stl_btn.setObjectName("secondaryButton")
+        self._reset_stl_btn.setEnabled(False)
+        self._reset_stl_btn.clicked.connect(self._on_reset_stl)
+        actions_layout.addWidget(self._reset_stl_btn)
         
         controls_layout.addWidget(actions_group)
         controls_layout.addStretch()
@@ -189,6 +195,7 @@ class MainWindow(QMainWindow):
         """Handle STL file loaded."""
         self._stl_loader = loader
         self._simulate_btn.setEnabled(True)
+        self._reset_stl_btn.setEnabled(True)
         
         # Display mesh in 3D viewer
         if loader.mesh is not None:
@@ -196,7 +203,7 @@ class MainWindow(QMainWindow):
         
         # Update memory estimation
         if loader.info is not None:
-            self._params_panel.update_memory_estimate(tuple(loader.info.dimensions))
+            self._params_panel.update_memory_estimate(tuple(loader.info.dimensions), loader.info.num_faces)
         
         self._status_bar.showMessage(
             f"Loaded: {loader.filepath.name} "
@@ -206,7 +213,7 @@ class MainWindow(QMainWindow):
     def _on_params_changed(self) -> None:
         """Handle parameter changes - update memory estimate."""
         if self._stl_loader is not None and self._stl_loader.info is not None:
-            self._params_panel.update_memory_estimate(tuple(self._stl_loader.info.dimensions))
+            self._params_panel.update_memory_estimate(tuple(self._stl_loader.info.dimensions), self._stl_loader.info.num_faces)
     
     def _on_simulate(self) -> None:
         """Run CT simulation."""
@@ -249,7 +256,11 @@ class MainWindow(QMainWindow):
             material=self._stl_panel.selected_material,
             fast_mode=self._params_panel.fast_mode,
             memory_limit_gb=self._params_panel.memory_limit_gb,
-            use_gpu=self._params_panel.use_gpu
+            use_gpu=self._params_panel.use_gpu,
+            physics_mode=self._params_panel.physics_mode,
+            physics_kvp=self._params_panel.physics_kvp,
+            physics_filtration=self._params_panel.physics_filtration,
+            physics_energy_bins=self._params_panel.physics_energy_bins
         )
         
         self._worker.progress.connect(self._on_sim_progress)
@@ -292,7 +303,12 @@ class MainWindow(QMainWindow):
         )
         
         # Build detailed timing message
-        mode_str = "GPU" if timing_info['use_gpu'] else "CPU"
+        if timing_info.get('physics_mode'):
+            mode_str = "Physics Mode (Polychromatic)"
+        elif timing_info['use_gpu']:
+            mode_str = "GPU"
+        else:
+            mode_str = "CPU"
         if timing_info['fast_mode']:
             mode_str += " (Fast Mode)"
         
@@ -438,6 +454,12 @@ class MainWindow(QMainWindow):
             "Export Error",
             f"An error occurred during export:\n\n{error_msg}"
         )
+
+    def _on_reset_stl(self) -> None:
+        """Reset 3D view to show STL mesh."""
+        if self._stl_loader is not None and self._stl_loader.mesh is not None:
+            self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
+            self._status_bar.showMessage("Reset 3D view to STL mesh")
     
     def _on_about(self) -> None:
         """Show about dialog."""

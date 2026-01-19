@@ -61,7 +61,11 @@ class SimulationWorker(QThread):
         material,
         fast_mode: bool,
         memory_limit_gb: float = 2.0,
-        use_gpu: bool = False
+        use_gpu: bool = False,
+        physics_mode: bool = False,
+        physics_kvp: int = 120,
+        physics_filtration: float = 2.5,
+        physics_energy_bins: int = 10
     ):
         super().__init__()
         self.mesh = mesh
@@ -74,12 +78,18 @@ class SimulationWorker(QThread):
         self.fast_mode = fast_mode
         self.memory_limit_gb = memory_limit_gb
         self.use_gpu = use_gpu
+        # Physics mode
+        self.physics_mode = physics_mode
+        self.physics_kvp = physics_kvp
+        self.physics_filtration = physics_filtration
+        self.physics_energy_bins = physics_energy_bins
     
     def run(self):
         try:
             timing_info = {
                 'use_gpu': self.use_gpu,
                 'fast_mode': self.fast_mode,
+                'physics_mode': self.physics_mode,
                 'voxelization_time': 0.0,
                 'simulation_time': 0.0,
                 'total_time': 0.0,
@@ -102,22 +112,49 @@ class SimulationWorker(QThread):
             
             # CT Simulation
             sim_start = time.perf_counter()
-            simulator = CTSimulator(
-                num_projections=self.num_projections,
-                add_noise=self.add_noise,
-                noise_level=self.noise_level,
-                use_gpu=self.use_gpu
-            )
             
             def sim_progress(p):
                 self.progress.emit(0.2 + p * 0.8)
             
-            if self.fast_mode:
+            if self.physics_mode:
+                # Use physical simulation with polychromatic physics
+                from simulation.physics import PhysicalCTSimulator, PhysicsConfig
+                
+                physics_config = PhysicsConfig(
+                    kvp=self.physics_kvp,
+                    filtration_mm_al=self.physics_filtration,
+                    energy_bins=self.physics_energy_bins
+                )
+                
+                simulator = PhysicalCTSimulator(
+                    config=physics_config,
+                    num_projections=self.num_projections
+                )
+                
+                ct_volume = simulator.simulate(
+                    voxel_grid,
+                    material=self.material,
+                    progress_callback=sim_progress
+                )
+                
+            elif self.fast_mode:
+                simulator = CTSimulator(
+                    num_projections=self.num_projections,
+                    add_noise=self.add_noise,
+                    noise_level=self.noise_level,
+                    use_gpu=self.use_gpu
+                )
                 ct_volume = simulator.simulate_fast(
                     voxel_grid,
                     material=self.material
                 )
             else:
+                simulator = CTSimulator(
+                    num_projections=self.num_projections,
+                    add_noise=self.add_noise,
+                    noise_level=self.noise_level,
+                    use_gpu=self.use_gpu
+                )
                 ct_volume = simulator.simulate(
                     voxel_grid,
                     material=self.material,
