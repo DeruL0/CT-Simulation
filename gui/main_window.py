@@ -20,6 +20,7 @@ from PySide6.QtGui import QAction
 
 from .style import ScientificStyle
 from .panels import STLPanel, ParamsPanel, ViewerPanel
+from .panels.structure_panel import StructurePanel
 from .workers import SimulationWorker, ExportWorker
 
 from loaders.stl_loader import STLLoader
@@ -32,6 +33,10 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        
+        # Data management
+        from core.data_manager import DataManager
+        self._data_manager = DataManager(self)
         
         self._stl_loader: Optional[STLLoader] = None
         self._ct_volume: Optional[CTVolume] = None
@@ -72,6 +77,10 @@ class MainWindow(QMainWindow):
         self._params_panel = ParamsPanel()
         controls_layout.addWidget(self._params_panel)
         
+        # Structure Panel (Industrial/Manual Modifiers)
+        self._structure_panel = StructurePanel(self._data_manager)
+        controls_layout.addWidget(self._structure_panel)
+        
         # Action buttons
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_group)
@@ -102,8 +111,8 @@ class MainWindow(QMainWindow):
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setMinimumWidth(280)
-        scroll_area.setMaximumWidth(400)
+        scroll_area.setMinimumWidth(320)  # Slightly wider for structure controls
+        scroll_area.setMaximumWidth(450)
         
         splitter.addWidget(scroll_area)
         
@@ -240,6 +249,10 @@ class MainWindow(QMainWindow):
         self._simulate_btn.setEnabled(True)
         self._reset_stl_btn.setEnabled(True)
         
+        # Update DataManager for StructurePanel
+        self._data_manager._stl_loader = loader
+        self._data_manager.stl_loaded.emit(loader)
+        
         # Display mesh in 3D viewer
         if loader.mesh is not None:
             self._viewer_3d_panel.set_mesh(loader.mesh)
@@ -296,7 +309,9 @@ class MainWindow(QMainWindow):
             physics_kvp=self._params_panel.physics_kvp,
             physics_tube_current=self._params_panel.physics_tube_current,
             physics_filtration=self._params_panel.physics_filtration,
-            physics_energy_bins=self._params_panel.physics_energy_bins
+            physics_energy_bins=self._params_panel.physics_energy_bins,
+            voxel_grid=self._data_manager.voxel_grid,  # Use pre-computed if available
+            structure_config=self._structure_panel.get_active_config() # Pass active structure config
         )
         
         self._worker.progress.connect(self._on_sim_progress)
@@ -458,10 +473,15 @@ class MainWindow(QMainWindow):
         self._show_error("Export Error", error_msg)
 
     def _on_reset_stl(self) -> None:
-        """Reset 3D view to show STL mesh."""
+        """Reset 3D view to show STL mesh and reset structure."""
         if self._stl_loader is not None and self._stl_loader.mesh is not None:
             self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
-            self._status_bar.showMessage("Reset 3D view to STL mesh")
+            
+            # Reset structure generation panel as well
+            if hasattr(self, '_structure_panel'):
+                self._structure_panel.reset_structure()
+                
+            self._status_bar.showMessage("Reset view and structure to original STL")
     
     def _on_about(self) -> None:
         """Show about dialog."""

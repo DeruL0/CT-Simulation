@@ -66,7 +66,9 @@ class SimulationWorker(QThread):
         physics_kvp: int = 120,
         physics_tube_current: int = 200,
         physics_filtration: float = 2.5,
-        physics_energy_bins: int = 10
+        physics_energy_bins: int = 10,
+        voxel_grid=None,  # Optional pre-computed VoxelGrid
+        structure_config=None  # Optional (method_name, config) for deferred generation
     ):
         super().__init__()
         self.mesh = mesh
@@ -85,6 +87,10 @@ class SimulationWorker(QThread):
         self.physics_tube_current = physics_tube_current
         self.physics_filtration = physics_filtration
         self.physics_energy_bins = physics_energy_bins
+        # Pre-computed voxel grid (from StructurePanel)
+        self.voxel_grid = voxel_grid
+        # Deferred structure configuration
+        self.structure_config = structure_config
     
     def run(self):
         try:
@@ -93,6 +99,7 @@ class SimulationWorker(QThread):
                 'fast_mode': self.fast_mode,
                 'physics_mode': self.physics_mode,
                 'voxelization_time': 0.0,
+                'structure_time': 0.0,
                 'simulation_time': 0.0,
                 'total_time': 0.0,
                 'gpu_timing': None
@@ -100,17 +107,56 @@ class SimulationWorker(QThread):
             
             total_start = time.perf_counter()
             
-            # Voxelization
+            # Voxelization (skip if pre-computed grid provided)
             self.progress.emit(0.0)
-            vox_start = time.perf_counter()
-            voxelizer = Voxelizer(
-                voxel_size=self.voxel_size,
-                fill_interior=self.fill_interior,
-                max_memory_gb=self.memory_limit_gb
-            )
-            voxel_grid = voxelizer.voxelize(self.mesh)
-            timing_info['voxelization_time'] = time.perf_counter() - vox_start
-            self.progress.emit(0.2)
+            
+            if self.voxel_grid is not None:
+                # Use pre-computed voxel grid (from StructurePanel)
+                # CLONE it to avoid modifying the version in DataManager (persistent defects)
+                # since StructureModifier works in-place
+                from simulation.voxelizer import VoxelGrid
+                voxel_grid = VoxelGrid(
+                    data=self.voxel_grid.data.copy(),
+                    voxel_size=self.voxel_grid.voxel_size,
+                    origin=self.voxel_grid.origin.copy()
+                )
+                timing_info['voxelization_time'] = 0.0
+                logging.info("Using cloned pre-computed voxel grid from StructurePanel")
+            else:
+                # Voxelize from mesh
+                vox_start = time.perf_counter()
+                voxelizer = Voxelizer(
+                    voxel_size=self.voxel_size,
+                    fill_interior=self.fill_interior,
+                    max_memory_gb=self.memory_limit_gb
+                )
+                voxel_grid = voxelizer.voxelize(self.mesh)
+                timing_info['voxelization_time'] = time.perf_counter() - vox_start
+            
+            # Deferred Structure Generation
+            if self.structure_config is not None:
+                struct_start = time.perf_counter()
+                self.progress.emit(0.1) # Start structure gen
+                
+                method_name, config = self.structure_config
+                from simulation.structures import StructureModifier
+                modifier = StructureModifier(voxel_grid)
+                
+                # Progress wrapper for structure generation
+                def struct_progress(p):
+                    # Map 0-1 to 0.1-0.3
+                    self.progress.emit(0.1 + p * 0.2)
+                
+                logging.info(f"Applying deferred structure generation: {method_name}")
+                if method_name == "generate_lattice":
+                    modifier.generate_lattice(config, progress_callback=struct_progress)
+                elif method_name == "generate_random_voids":
+                    modifier.generate_random_voids(config, progress_callback=struct_progress)
+                    
+                timing_info['structure_time'] = time.perf_counter() - struct_start
+                voxel_grid = modifier.grid
+                
+            self.progress.emit(0.3)  # Ready for sim
             
             # CT Simulation
             sim_start = time.perf_counter()
@@ -218,4 +264,70 @@ class ExportWorker(QThread):
         except Exception as e:
             import traceback
             logging.error(f"Export error: {e}\n{traceback.format_exc()}")
+            self.error.emit(str(e))
+
+
+class StructureWorker(QThread):
+    """Background worker for structure generation."""
+    
+    progress = Signal(float)
+    finished = Signal(object)  # Emits VoxelGrid
+    error = Signal(str)
+    
+    def __init__(
+        self,
+        modifier,  # Type: StructureModifier or None
+        method_name: str,
+        config: object,
+        mesh=None,
+        voxel_size: float = 0.5
+    ):
+        super().__init__()
+        self.modifier = modifier
+        self.method_name = method_name
+        self.config = config
+        self.mesh = mesh
+        self.voxel_size = voxel_size
+    
+    def run(self):
+        try:
+            self.progress.emit(0.0)
+            
+            # Auto-initialization if needed
+            start_progress = 0.0
+            if self.modifier is None:
+                if self.mesh is None:
+                    raise ValueError("No modifier and no mesh provided")
+                    
+                from simulation.voxelizer import Voxelizer
+                from simulation.structures import StructureModifier
+                
+                logging.info(f"Auto-initializing grid with voxel size {self.voxel_size}mm...")
+                voxelizer = Voxelizer(voxel_size=self.voxel_size, fill_interior=True)
+                voxel_grid = voxelizer.voxelize(self.mesh)
+                self.modifier = StructureModifier(voxel_grid)
+                
+                self.progress.emit(0.3)  # Initialization done
+                start_progress = 0.3
+            
+            # Progress callback wrapper
+            # Scales 0.0-1.0 from modifier to start_progress-1.0
+            def on_progress(p):
+                # Ensure p is clamped 0-1
+                p = max(0.0, min(1.0, float(p)))
+                total_progress = start_progress + p * (1.0 - start_progress)
+                self.progress.emit(total_progress)
+            
+            # Run generation with progress
+            if self.method_name == "generate_lattice":
+                self.modifier.generate_lattice(self.config, progress_callback=on_progress)
+            elif self.method_name == "generate_random_voids":
+                self.modifier.generate_random_voids(self.config, progress_callback=on_progress)
+            
+            self.progress.emit(1.0)
+            self.finished.emit(self.modifier.grid)
+            
+        except Exception as e:
+            import traceback
+            logging.error(f"Structure generation error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))

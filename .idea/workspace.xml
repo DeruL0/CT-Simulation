@@ -6,11 +6,10 @@
   <component name="ChangeListManager">
     <list default="true" id="da894b2b-fb82-4f2f-91f7-0dafbbfe7bd3" name="更改" comment="first commit">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/data_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/data_manager.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/main_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/loaders/stl_loader.py" beforeDir="false" afterPath="$PROJECT_DIR$/loaders/stl_loader.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/backends/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/backends/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/backends/cpu_backend.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/backends/cpu_backend.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/backends/gpu_backend.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/backends/gpu_backend.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/params_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/params_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/workers.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/simulation/physics/physical_simulator.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/physical_simulator.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />

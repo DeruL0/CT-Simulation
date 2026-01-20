@@ -527,14 +527,15 @@ class PhysicalCTSimulator:
         return hu_slice.astype(cp.float32), output_size
     
     def _radon_gpu(self, image_gpu: "cp.ndarray", theta_deg: "cp.ndarray") -> "cp.ndarray":
-        """Vectorized GPU Radon transform with diagonal-based detector size."""
+        """Vectorized GPU Radon transform with diagonal-based detector size.
+           Optimized with chunking to prevent OOM."""
         H, W = image_gpu.shape
         
-        # Compute detector count based on image diagonal (matching skimage behavior)
+        # Compute detector count based on image diagonal
         n_det = int(cp.ceil(cp.sqrt(H**2 + W**2)))
         n_angles = len(theta_deg)
         
-        theta_rad = theta_deg * (cp.pi / 180.0)
+        theta_rad_all = theta_deg * (cp.pi / 180.0)
         
         # Image center
         img_center_x = (W - 1) / 2.0
@@ -542,61 +543,82 @@ class PhysicalCTSimulator:
         
         # Detector coordinates centered at 0
         det_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
-        
-        # Ray path coordinates (s along the ray direction)
-        # Must use n_det (diagonal length) to ensure rays fully traverse the image at all angles
         s_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
         
-        # Reshape for broadcasting: (n_angles, n_det, n_s)
-        theta = theta_rad.reshape(-1, 1, 1)
+        # Output sinogram
+        sinogram = cp.zeros((n_det, n_angles), dtype=cp.float32)
+        
+        # Batch processing to save memory
+        # Detailed memory calculation:
+        # A 1024x1024 image -> n_det ~ 1450
+        # A chunk of size N uses: N * 1450 * 1450 * 4 bytes * 6 arrays (x, y, x0, y0, wx, wy)
+        # N=10 -> ~500MB. N=360 -> ~18GB (OOM!)
+        # Safe batch size ~ 5-10 angles depending on VRAM
+        BATCH_SIZE = 10 
+        
         t = det_coords.reshape(1, -1, 1)
         s = s_coords.reshape(1, 1, -1)
         
-        cos_t = cp.cos(theta)
-        sin_t = cp.sin(theta)
-        
-        # Compute sampling coordinates in image space
-        # Standard Radon transform coordinate mapping:
-        # x = t * cos(theta) - s * sin(theta)
-        # y = t * sin(theta) + s * cos(theta)
-        # s is the integration variable (along the ray)
-        # t is the detector position (perpendicular to ray)
-        x_coords = t * cos_t - s * sin_t + img_center_x
-        y_coords = t * sin_t + s * cos_t + img_center_y
-        
-        # Bilinear interpolation
-        x0 = cp.floor(x_coords).astype(cp.int32)
-        y0 = cp.floor(y_coords).astype(cp.int32)
-        x1 = x0 + 1
-        y1 = y0 + 1
-        
-        wx = x_coords - x0.astype(cp.float32)
-        wy = y_coords - y0.astype(cp.float32)
-        
-        x0_clamped = cp.clip(x0, 0, W - 1)
-        x1_clamped = cp.clip(x1, 0, W - 1)
-        y0_clamped = cp.clip(y0, 0, H - 1)
-        y1_clamped = cp.clip(y1, 0, H - 1)
-        
-        valid_mask = ((x0 >= 0) & (x1 < W) & (y0 >= 0) & (y1 < H)).astype(cp.float32)
-        
-        v00 = image_gpu[y0_clamped, x0_clamped]
-        v01 = image_gpu[y0_clamped, x1_clamped]
-        v10 = image_gpu[y1_clamped, x0_clamped]
-        v11 = image_gpu[y1_clamped, x1_clamped]
-        
-        samples = (
-            v00 * (1 - wx) * (1 - wy) +
-            v01 * wx * (1 - wy) +
-            v10 * (1 - wx) * wy +
-            v11 * wx * wy
-        ) * valid_mask
-        
-        # Sum along ray path and transpose to (n_det, n_angles)
-        return samples.sum(axis=2).T.astype(cp.float32)
+        for i in range(0, n_angles, BATCH_SIZE):
+            theta_chunk = theta_rad_all[i:i+BATCH_SIZE]
+            current_batch_size = len(theta_chunk)
+            
+            theta = theta_chunk.reshape(-1, 1, 1)
+            
+            cos_t = cp.cos(theta)
+            sin_t = cp.sin(theta)
+            
+            # Compute sampling coordinates
+            x_coords = t * cos_t - s * sin_t + img_center_x
+            y_coords = t * sin_t + s * cos_t + img_center_y
+            
+            # Bilinear interpolation
+            x0 = cp.floor(x_coords).astype(cp.int32)
+            y0 = cp.floor(y_coords).astype(cp.int32)
+            x1 = x0 + 1
+            y1 = y0 + 1
+            
+            wx = x_coords - x0.astype(cp.float32)
+            wy = y_coords - y0.astype(cp.float32)
+            
+            # Free coordinates early
+            del x_coords, y_coords
+            
+            x0_clamped = cp.clip(x0, 0, W - 1)
+            x1_clamped = cp.clip(x1, 0, W - 1)
+            y0_clamped = cp.clip(y0, 0, H - 1)
+            y1_clamped = cp.clip(y1, 0, H - 1)
+            
+            valid_mask = ((x0 >= 0) & (x1 < W) & (y0 >= 0) & (y1 < H)).astype(cp.float32)
+            
+            # Free integer coordinates
+            del x0, y0, x1, y1
+            
+            v00 = image_gpu[y0_clamped, x0_clamped]
+            v01 = image_gpu[y0_clamped, x1_clamped]
+            v10 = image_gpu[y1_clamped, x0_clamped]
+            v11 = image_gpu[y1_clamped, x1_clamped]
+            
+            samples = (
+                v00 * (1 - wx) * (1 - wy) +
+                v01 * wx * (1 - wy) +
+                v10 * (1 - wx) * wy +
+                v11 * wx * wy
+            ) * valid_mask
+            
+            # Sum along ray path and assign to output
+            sinogram[:, i:i+current_batch_size] = samples.sum(axis=2).T
+            
+            # Clean up batch memory
+            del samples, valid_mask, wx, wy, v00, v01, v10, v11
+            del x0_clamped, x1_clamped, y0_clamped, y1_clamped
+            cp.get_default_memory_pool().free_all_blocks()
+            
+        return sinogram
     
     def _iradon_gpu(self, sinogram_gpu: "cp.ndarray", theta_deg: "cp.ndarray", output_size: int) -> "cp.ndarray":
-        """Vectorized GPU inverse Radon (filtered back projection)."""
+        """Vectorized GPU inverse Radon (filtered back projection).
+           Optimized with chunking to prevent OOM."""
         n_angles = len(theta_deg)
         n_det = sinogram_gpu.shape[0]
         
@@ -612,6 +634,10 @@ class PhysicalCTSimulator:
         filtered_sino = cp.fft.ifft(f_sino * ramp, axis=0).real
         filtered_sino = filtered_sino[:n_det, :].astype(cp.float32)
         
+        # Free unnecessary memory
+        del padded_sino, f_sino, f, ramp
+        cp.get_default_memory_pool().free_all_blocks()
+        
         # Backprojection
         center = (output_size - 1) / 2.0
         grid_1d = cp.arange(output_size, dtype=cp.float32) - center
@@ -620,32 +646,57 @@ class PhysicalCTSimulator:
         x_flat = x_grid.ravel()
         y_flat = y_grid.ravel()
         
-        theta_rad = theta_deg * (cp.pi / 180.0)
-        cos_t = cp.cos(theta_rad).reshape(-1, 1)
-        sin_t = cp.sin(theta_rad).reshape(-1, 1)
+        # Reuse single output buffer
+        reconstructed = cp.zeros((output_size * output_size), dtype=cp.float32)
         
-        t_all = x_flat * cos_t + y_flat * sin_t
+        theta_rad_all = theta_deg * (cp.pi / 180.0)
         det_center = (n_det - 1) / 2.0
-        t_idx = t_all + det_center
         
-        t_idx_floor = cp.floor(t_idx).astype(cp.int32)
-        t_idx_ceil = t_idx_floor + 1
-        t_frac = t_idx - t_idx_floor.astype(cp.float32)
+        # Batch processing for backprojection
+        # Memory bottleneck: t_all (output_size^2) and broadcasted arrays
+        # 1024x1024 output -> 1M pixels.
+        # Batch size can be larger here than Radon since we sum into a single buffer
+        # But angle_idx broadcast is (1M x BATCH) floats.
+        # BATCH=10 -> 40MB. Safe.
+        BATCH_SIZE = 40
         
-        t_idx_floor = cp.clip(t_idx_floor, 0, n_det - 1)
-        t_idx_ceil = cp.clip(t_idx_ceil, 0, n_det - 1)
-        
-        angle_idx = cp.arange(n_angles, dtype=cp.int32).reshape(-1, 1)
-        angle_idx = cp.broadcast_to(angle_idx, t_idx.shape)
-        
-        val_floor = filtered_sino[t_idx_floor, angle_idx]
-        val_ceil = filtered_sino[t_idx_ceil, angle_idx]
-        
-        sampled = val_floor * (1 - t_frac) + val_ceil * t_frac
-        recon_flat = sampled.sum(axis=0)
-        recon = recon_flat.reshape(output_size, output_size)
-        
-        return recon * (cp.pi / (2 * n_angles))
+        for i in range(0, n_angles, BATCH_SIZE):
+            theta_chunk = theta_rad_all[i:i+BATCH_SIZE]
+            current_batch_size = len(theta_chunk)
+            
+            cos_t = cp.cos(theta_chunk).reshape(-1, 1)
+            sin_t = cp.sin(theta_chunk).reshape(-1, 1)
+            
+            # Broadcast to (current_batch, num_pixels)
+            # t_all = x * cos + y * sin
+            # Shape: (BATCH, N_PIXELS)
+            # NOTE: Logic transposed compared to original for broadcasting efficiency
+            t_all = x_flat.reshape(1, -1) * cos_t + y_flat.reshape(1, -1) * sin_t
+            t_idx = t_all + det_center
+            
+            t_idx_floor = cp.floor(t_idx).astype(cp.int32)
+            t_idx_ceil = t_idx_floor + 1
+            t_frac = t_idx - t_idx_floor.astype(cp.float32)
+            
+            t_idx_floor = cp.clip(t_idx_floor, 0, n_det - 1)
+            t_idx_ceil = cp.clip(t_idx_ceil, 0, n_det - 1)
+            
+            angle_indices = cp.arange(i, i+current_batch_size, dtype=cp.int32).reshape(-1, 1)
+            # No need to broadcast angle_idx memory, just use index in gather
+            
+            val_floor = filtered_sino[t_idx_floor, angle_indices]
+            val_ceil = filtered_sino[t_idx_ceil, angle_indices]
+            
+            sampled = val_floor * (1 - t_frac) + val_ceil * t_frac
+            
+            # Sum over angles in this batch
+            reconstructed += sampled.sum(axis=0)
+            
+            # Free batch memory
+            del t_all, t_idx, t_idx_floor, t_idx_ceil, t_frac, val_floor, val_ceil, sampled
+            cp.get_default_memory_pool().free_all_blocks()
+            
+        return reconstructed.reshape(output_size, output_size) * (cp.pi / (2 * n_angles))
     
     @property
     def spectrum(self) -> XRaySpectrum:

@@ -9,7 +9,8 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QLabel, QSlider, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QFormLayout, QComboBox, QStackedWidget
+    QCheckBox, QFormLayout, QComboBox, QStackedWidget,
+    QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
 import math
@@ -52,6 +53,7 @@ class ParamsPanel(QWidget):
         
         # Stacked widget for different inputs
         self._input_stack = QStackedWidget()
+        self._input_stack.currentChanged.connect(self._update_stack_sizing)
         
         # Page 0: Manual Voxel Size
         page_manual = QWidget()
@@ -130,6 +132,9 @@ class ParamsPanel(QWidget):
         layout_combined.addRow("", self._combined_info_label)
         self._input_stack.addWidget(page_combined)
         
+        # Initialize sizing
+        self._update_stack_sizing(0)
+        
         voxel_layout.addWidget(self._input_stack)
         
         # Fill interior checkbox (common)
@@ -137,6 +142,9 @@ class ParamsPanel(QWidget):
         self._fill_interior_check.setChecked(True)
         self._fill_interior_check.stateChanged.connect(self._on_param_changed)
         voxel_layout.addWidget(self._fill_interior_check)
+        
+        # Stretch at bottom of voxel group for adaptive height
+        voxel_layout.addStretch()
         
         layout.addWidget(voxel_group)
         
@@ -294,6 +302,18 @@ class ParamsPanel(QWidget):
         
         # Stretch at bottom
         layout.addStretch()
+
+    def _update_stack_sizing(self, index):
+        """Update stack widget size policy to fit current page."""
+        for i in range(self._input_stack.count()):
+            widget = self._input_stack.widget(i)
+            if i == index:
+                widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                widget.updateGeometry()
+            else:
+                widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # Trigger layout update
+        self._input_stack.adjustSize()
     
     def _on_param_changed(self) -> None:
         """Handle parameter change."""
