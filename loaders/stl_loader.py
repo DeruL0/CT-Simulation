@@ -96,6 +96,24 @@ class STLLoader:
         """Get the cache file path for a given key."""
         return _CACHE_DIR / f"{cache_key}.glb"
     
+    @staticmethod
+    def clear_cache() -> int:
+        """
+        Clear all cached mesh files.
+        
+        Returns:
+            Number of files deleted
+        """
+        count = 0
+        try:
+            for cache_file in _CACHE_DIR.glob("*.glb"):
+                cache_file.unlink()
+                count += 1
+            logging.info(f"Cleared {count} cached mesh files from {_CACHE_DIR}")
+        except Exception as e:
+            logging.warning(f"Failed to clear cache: {e}")
+        return count
+    
     def _save_to_cache(self) -> None:
         """Save current mesh to disk cache."""
         if self.mesh is None or self._cache_key is None:
@@ -152,13 +170,21 @@ class STLLoader:
         
         raise ValueError(f"Unexpected mesh type: {type(mesh_or_scene)}")
     
-    def load(self, filepath: str | Path, use_cache: bool = True) -> trimesh.Trimesh:
+    def load(
+        self, 
+        filepath: str | Path, 
+        use_cache: bool = True,
+        auto_normalize: bool = True,
+        target_size_mm: float = 100.0
+    ) -> trimesh.Trimesh:
         """
         Load an STL file.
         
         Args:
             filepath: Path to the STL file
             use_cache: Whether to use disk caching (default True)
+            auto_normalize: Whether to auto-scale mesh to target size (default True)
+            target_size_mm: Target max dimension in mm when normalizing (default 100)
             
         Returns:
             trimesh.Trimesh object
@@ -184,6 +210,9 @@ class STLLoader:
             cached_mesh = self._load_from_cache(self._cache_key)
             if cached_mesh is not None:
                 self.mesh = cached_mesh
+                # Apply normalization to cached mesh too (in case cache was from old version)
+                if auto_normalize:
+                    self._normalize_mesh(target_size_mm)
                 self._filepath = filepath
                 self._compute_info()
                 logging.info("Using cached mesh data.")
@@ -202,6 +231,10 @@ class STLLoader:
         # Final verification
         if isinstance(self.mesh, trimesh.Scene):
             raise ValueError("Failed to convert Scene to Mesh")
+        
+        # Auto-normalize mesh size if dimensions are unreasonable
+        if auto_normalize:
+            self._normalize_mesh(target_size_mm)
             
         self._filepath = filepath
         self._compute_info()
@@ -211,6 +244,39 @@ class STLLoader:
             self._save_to_cache()
         
         return self.mesh
+    
+    def _normalize_mesh(self, target_size_mm: float = 100.0) -> None:
+        """
+        Normalize mesh to exactly fit target size.
+        
+        Always scales the mesh so that its largest dimension equals
+        target_size_mm, and centers it at the origin.
+        
+        Args:
+            target_size_mm: Target max dimension in mm
+        """
+        if self.mesh is None:
+            return
+        
+        bounds = self.mesh.bounds
+        current_size = np.max(bounds[1] - bounds[0])
+        
+        if current_size <= 0:
+            logging.warning("Mesh has zero size, skipping normalization")
+            return
+        
+        # Always scale to target size
+        scale_factor = target_size_mm / current_size
+        
+        # Apply scaling
+        self.mesh.apply_scale(scale_factor)
+        
+        # Center at origin
+        centroid = self.mesh.centroid
+        self.mesh.apply_translation(-centroid)
+        
+        new_size = np.max(self.mesh.bounds[1] - self.mesh.bounds[0])
+        logging.info(f"Mesh normalized: {current_size:.2f} -> {new_size:.1f} mm (scale: {scale_factor:.4f})")
     
     def reload_from_cache(self) -> Optional[trimesh.Trimesh]:
         """

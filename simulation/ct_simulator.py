@@ -184,11 +184,14 @@ class CTSimulator:
         progress_callback: Optional[Callable[[float], None]],
         voxel_grid: VoxelGrid
     ) -> CTVolume:
-        """CPU simulation using ThreadPoolExecutor."""
+        """CPU simulation using ThreadPoolExecutor. Output is always square."""
         total_start = time.perf_counter()
         
         num_slices = hu_volume.shape[2]
-        reconstructed = np.zeros_like(hu_volume)
+        h, w = hu_volume.shape[:2]
+        output_size = max(h, w)  # Square output
+        
+        reconstructed = np.zeros((output_size, output_size, num_slices), dtype=np.float32)
         
         progress_lock = threading.Lock()
         completed_slices = 0
@@ -198,8 +201,8 @@ class CTSimulator:
             slice_2d = hu_volume[:, :, i]
             slice_shifted = slice_2d - background_hu
             
-            # Use backend for processing
-            reconstructed_slice = backend.process_slice(
+            # Use backend for processing (returns tuple now)
+            reconstructed_slice, _ = backend.process_slice(
                 slice_shifted,
                 self.theta,
                 add_noise=self.add_noise,
@@ -245,7 +248,7 @@ class CTSimulator:
         background_hu: float,
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> CTVolume:
-        """GPU simulation with optimized data transfers."""
+        """GPU simulation with optimized data transfers. Output is always square."""
         from .backends.gpu_backend import GPUBackend
         
         total_start = time.perf_counter()
@@ -257,11 +260,13 @@ class CTSimulator:
         cpu_data = voxel_grid.data
         slices = cpu_data.shape[2]
         h, w = cpu_data.shape[0], cpu_data.shape[1]
+        output_size = max(h, w)  # Square output
         
         logging.info(f"Volume shape: {cpu_data.shape} ({h}x{w}x{slices})")
+        logging.info(f"Output size: {output_size}x{output_size}x{slices}")
         logging.info(f"Number of projections: {self.num_projections}")
         
-        reconstructed_cpu = np.zeros(cpu_data.shape, dtype=np.float32)
+        reconstructed_cpu = np.zeros((output_size, output_size, slices), dtype=np.float32)
         
         # Timing accumulators
         time_transfer_to_gpu = 0.0

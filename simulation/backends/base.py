@@ -62,12 +62,14 @@ class SimulationBackend(ABC):
         theta: np.ndarray,
         add_noise: bool = False,
         noise_level: float = 0.02
-    ) -> np.ndarray:
+    ) -> tuple:
         """
         Process a single slice through forward/backward projection.
         
         This is the main entry point for slice-by-slice simulation.
         Subclasses may override for optimized implementations.
+        
+        Output is always a square based on the longer edge.
         
         Args:
             slice_2d: Input 2D slice (already shifted, background=0)
@@ -76,30 +78,48 @@ class SimulationBackend(ABC):
             noise_level: Noise level as fraction of signal
             
         Returns:
-            Reconstructed slice
+            Tuple of (reconstructed_slice, output_size) where slice is square
         """
-        # Pad to diagonal
         original_shape = slice_2d.shape
-        diag_len = int(np.ceil(np.sqrt(original_shape[0]**2 + original_shape[1]**2)))
-        pad_h = diag_len - original_shape[0]
-        pad_w = diag_len - original_shape[1]
         
-        if pad_h > 0 or pad_w > 0:
-            pad_top = pad_h // 2
-            pad_bottom = pad_h - pad_top
-            pad_left = pad_w // 2
-            pad_right = pad_w - pad_left
-            
-            slice_padded = np.pad(
+        # Output will be a square based on the longer edge
+        output_size = max(original_shape[0], original_shape[1])
+        
+        # Pad to diagonal size for proper radon/iradon transform
+        diag_len = int(np.ceil(np.sqrt(output_size**2 + output_size**2))) + 32
+        
+        # First pad to square (output_size x output_size)
+        pad_to_square_h = output_size - original_shape[0]
+        pad_to_square_w = output_size - original_shape[1]
+        sq_pad_top = pad_to_square_h // 2
+        sq_pad_left = pad_to_square_w // 2
+        
+        if pad_to_square_h > 0 or pad_to_square_w > 0:
+            square_slice = np.pad(
                 slice_2d,
-                ((pad_top, pad_bottom), (pad_left, pad_right)),
+                ((sq_pad_top, pad_to_square_h - sq_pad_top), 
+                 (sq_pad_left, pad_to_square_w - sq_pad_left)),
                 mode='constant',
                 constant_values=0.0
             )
         else:
-            slice_padded = slice_2d
-            pad_top = 0
-            pad_left = 0
+            square_slice = slice_2d
+        
+        # Then pad to diagonal for radon transform
+        diag_pad = diag_len - output_size
+        diag_pad_half = diag_pad // 2
+        
+        if diag_pad > 0:
+            slice_padded = np.pad(
+                square_slice,
+                ((diag_pad_half, diag_pad - diag_pad_half), 
+                 (diag_pad_half, diag_pad - diag_pad_half)),
+                mode='constant',
+                constant_values=0.0
+            )
+        else:
+            slice_padded = square_slice
+            diag_pad_half = 0
         
         # Forward projection
         sinogram = self.radon(slice_padded, theta)
@@ -116,11 +136,11 @@ class SimulationBackend(ABC):
         # Backward projection
         reconstructed = self.iradon(sinogram, theta, diag_len)
         
-        # Crop back
-        if pad_h > 0 or pad_w > 0:
+        # Crop back to output_size x output_size (square)
+        if diag_pad > 0:
             reconstructed = reconstructed[
-                pad_top:pad_top+original_shape[0],
-                pad_left:pad_left+original_shape[1]
+                diag_pad_half:diag_pad_half + output_size,
+                diag_pad_half:diag_pad_half + output_size
             ]
         
-        return reconstructed
+        return reconstructed, output_size

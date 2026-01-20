@@ -162,6 +162,12 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
         
+        clear_cache_action = QAction("Clear Mesh Cache", self)
+        clear_cache_action.triggered.connect(self._on_clear_cache)
+        file_menu.addAction(clear_cache_action)
+        
+        file_menu.addSeparator()
+        
         exit_action = QAction("Exit", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
@@ -204,6 +210,17 @@ class MainWindow(QMainWindow):
         self._export_btn.setEnabled(self._ct_volume is not None)
         self._status_bar.showMessage(f"Error: {message}")
         QMessageBox.critical(self, title, f"An error occurred:\n\n{message}")
+    
+    def _on_clear_cache(self) -> None:
+        """Handle File > Clear Mesh Cache."""
+        count = STLLoader.clear_cache()
+        QMessageBox.information(
+            self,
+            "Cache Cleared",
+            f"Deleted {count} cached mesh file(s).\n\n"
+            "Please reload your STL file to apply the latest normalization settings."
+        )
+        self._status_bar.showMessage(f"Cleared {count} cached files")
     
     def _on_open_stl(self) -> None:
         """Handle File > Open STL."""

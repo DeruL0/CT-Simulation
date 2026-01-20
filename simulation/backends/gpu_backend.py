@@ -44,7 +44,7 @@ class GPUBackend(SimulationBackend):
         theta: np.ndarray
     ) -> np.ndarray:
         """
-        Fully vectorized GPU Radon transform.
+        Fully vectorized GPU Radon transform with diagonal-based detector size.
         
         All angles are processed in a single GPU operation using
         manual bilinear interpolation (no Python loops).
@@ -53,17 +53,24 @@ class GPUBackend(SimulationBackend):
         image_gpu = cp.asarray(image, dtype=cp.float32)
         theta_deg = cp.asarray(theta, dtype=cp.float32)
         
-        n_angles = len(theta_deg)
         H, W = image_gpu.shape
-        size = H  # Assume square after padding
+        
+        # Compute detector count based on image diagonal (matching skimage behavior)
+        n_det = int(np.ceil(np.sqrt(H**2 + W**2)))
+        n_angles = len(theta_deg)
         
         # Convert angles to radians
         theta_rad = theta_deg * (cp.pi / 180.0)
         
-        # Create coordinate grids
-        center = (size - 1) / 2.0
-        det_coords = cp.arange(size, dtype=cp.float32) - center
-        s_coords = cp.arange(size, dtype=cp.float32) - center
+        # Image center
+        img_center_x = (W - 1) / 2.0
+        img_center_y = (H - 1) / 2.0
+        
+        # Detector coordinates centered at 0
+        det_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
+        
+        # Ray path coordinates - use n_det for full diagonal coverage
+        s_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
         
         # Reshape for broadcasting
         theta = theta_rad.reshape(-1, 1, 1)
@@ -74,8 +81,8 @@ class GPUBackend(SimulationBackend):
         cos_t = cp.cos(theta)
         sin_t = cp.sin(theta)
         
-        x_coords = -t * sin_t + s * cos_t + center
-        y_coords = t * cos_t + s * sin_t + center
+        x_coords = t * cos_t - s * sin_t + img_center_x
+        y_coords = t * sin_t + s * cos_t + img_center_y
         
         # Bilinear interpolation
         x0 = cp.floor(x_coords).astype(cp.int32)
@@ -187,29 +194,49 @@ class GPUBackend(SimulationBackend):
         Process slice entirely on GPU without CPU transfers.
         
         This is an optimized version that keeps data on GPU.
+        Output is always a square based on the longer edge.
         Returns a CuPy array.
         """
         original_shape = slice_gpu.shape
-        diag_len = int(np.ceil(np.sqrt(original_shape[0]**2 + original_shape[1]**2)))
-        pad_h = diag_len - original_shape[0]
-        pad_w = diag_len - original_shape[1]
         
-        if pad_h > 0 or pad_w > 0:
-            pad_top = pad_h // 2
-            pad_bottom = pad_h - pad_top
-            pad_left = pad_w // 2
-            pad_right = pad_w - pad_left
-            
-            slice_padded = cp.pad(
+        # Output will be a square based on the longer edge
+        output_size = max(original_shape[0], original_shape[1])
+        
+        # Pad to diagonal size for proper radon/iradon transform
+        diag_len = int(np.ceil(np.sqrt(output_size**2 + output_size**2))) + 32
+        
+        # First pad to square (output_size x output_size)
+        pad_to_square_h = output_size - original_shape[0]
+        pad_to_square_w = output_size - original_shape[1]
+        sq_pad_top = pad_to_square_h // 2
+        sq_pad_left = pad_to_square_w // 2
+        
+        if pad_to_square_h > 0 or pad_to_square_w > 0:
+            square_slice = cp.pad(
                 slice_gpu,
-                ((pad_top, pad_bottom), (pad_left, pad_right)),
+                ((sq_pad_top, pad_to_square_h - sq_pad_top), 
+                 (sq_pad_left, pad_to_square_w - sq_pad_left)),
                 mode='constant',
                 constant_values=0.0
             )
         else:
-            slice_padded = slice_gpu
-            pad_top = 0
-            pad_left = 0
+            square_slice = slice_gpu
+        
+        # Then pad to diagonal for radon transform
+        diag_pad = diag_len - output_size
+        diag_pad_half = diag_pad // 2
+        
+        if diag_pad > 0:
+            slice_padded = cp.pad(
+                square_slice,
+                ((diag_pad_half, diag_pad - diag_pad_half), 
+                 (diag_pad_half, diag_pad - diag_pad_half)),
+                mode='constant',
+                constant_values=0.0
+            )
+        else:
+            slice_padded = square_slice
+            diag_pad_half = 0
         
         # Forward projection (on GPU)
         sinogram = self._radon_gpu(slice_padded, theta_gpu)
@@ -227,26 +254,37 @@ class GPUBackend(SimulationBackend):
         # Backward projection (on GPU)
         reconstructed = self._iradon_gpu(sinogram, theta_gpu, diag_len)
         
-        # Crop back
-        if pad_h > 0 or pad_w > 0:
+        # Crop back to output_size x output_size (square)
+        if diag_pad > 0:
             reconstructed = reconstructed[
-                pad_top:pad_top+original_shape[0],
-                pad_left:pad_left+original_shape[1]
+                diag_pad_half:diag_pad_half + output_size,
+                diag_pad_half:diag_pad_half + output_size
             ]
         
         return reconstructed
     
     def _radon_gpu(self, image_gpu, theta_deg):
-        """Internal GPU Radon without CPU transfers."""
-        n_angles = len(theta_deg)
+        """Internal GPU Radon with diagonal-based detector size."""
         H, W = image_gpu.shape
-        size = H
+        
+        # Compute detector count based on image diagonal (matching skimage behavior)
+        n_det = int(np.ceil(np.sqrt(H**2 + W**2)))
+        n_angles = len(theta_deg)
         
         theta_rad = theta_deg * (cp.pi / 180.0)
-        center = (size - 1) / 2.0
-        det_coords = cp.arange(size, dtype=cp.float32) - center
-        s_coords = cp.arange(size, dtype=cp.float32) - center
         
+        # Image center
+        img_center_x = (W - 1) / 2.0
+        img_center_y = (H - 1) / 2.0
+        
+        # Detector coordinates centered at 0
+        det_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
+        
+        # Ray path coordinates (s along the ray direction)
+        # Must use n_det (diagonal length) to ensure rays fully traverse the image at all angles
+        s_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
+        
+        # Reshape for broadcasting: (n_angles, n_det, n_s)
         theta = theta_rad.reshape(-1, 1, 1)
         t = det_coords.reshape(1, -1, 1)
         s = s_coords.reshape(1, 1, -1)
@@ -254,8 +292,12 @@ class GPUBackend(SimulationBackend):
         cos_t = cp.cos(theta)
         sin_t = cp.sin(theta)
         
-        x_coords = -t * sin_t + s * cos_t + center
-        y_coords = t * cos_t + s * sin_t + center
+        # Compute sampling coordinates in image space
+        # Standard Radon transform coordinate mapping:
+        # x = t * cos(theta) - s * sin(theta)
+        # y = t * sin(theta) + s * cos(theta)
+        x_coords = t * cos_t - s * sin_t + img_center_x
+        y_coords = t * sin_t + s * cos_t + img_center_y
         
         x0 = cp.floor(x_coords).astype(cp.int32)
         y0 = cp.floor(y_coords).astype(cp.int32)
@@ -284,6 +326,7 @@ class GPUBackend(SimulationBackend):
             v11 * wx * wy
         ) * valid_mask
         
+        # Sum along ray path and transpose to (n_det, n_angles)
         return samples.sum(axis=2).T.astype(cp.float32)
     
     def _iradon_gpu(self, sinogram_gpu, theta_deg, output_size):

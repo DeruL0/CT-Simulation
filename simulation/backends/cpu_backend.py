@@ -44,7 +44,7 @@ class CPUBackend(SimulationBackend):
         Returns:
             Sinogram (n_det, n_angles)
         """
-        return radon(image, theta=theta, circle=True)
+        return radon(image, theta=theta, circle=False)
     
     def iradon(
         self, 
@@ -66,7 +66,7 @@ class CPUBackend(SimulationBackend):
         return iradon(
             sinogram,
             theta=theta,
-            circle=True,
+            circle=False,
             filter_name='ramp',
             output_size=output_size
         )

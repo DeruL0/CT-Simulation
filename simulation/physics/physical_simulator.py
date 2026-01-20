@@ -206,9 +206,10 @@ class PhysicalCTSimulator:
         if self.config.use_gpu and not HAS_CUPY:
             logging.warning("GPU requested but CuPy not available, falling back to CPU")
         
-        # Process slices
+        # Process slices - output will be square based on max(H, W)
         num_slices = voxel_grid.data.shape[2]
-        reconstructed = np.zeros_like(voxel_grid.data, dtype=np.float32)
+        h, w = voxel_grid.data.shape[:2]
+        output_size = max(h, w)
         
         if use_gpu:
             # GPU path: batch process on GPU
@@ -219,13 +220,14 @@ class PhysicalCTSimulator:
             )
         else:
             # CPU path: parallel threads
+            reconstructed = np.zeros((output_size, output_size, num_slices), dtype=np.float32)
             progress_lock = threading.Lock()
             completed_slices = 0
             
             def process_slice(slice_idx: int):
                 nonlocal completed_slices
                 slice_2d = voxel_grid.data[:, :, slice_idx]
-                recon_slice = self._simulate_slice(
+                recon_slice, _ = self._simulate_slice(
                     slice_2d,
                     mu_object, mu_background,
                     bin_weights, bin_centers
@@ -271,34 +273,54 @@ class PhysicalCTSimulator:
         """
         Simulate CT for a single 2D slice with polychromatic physics.
         
+        Output is always square based on the longer edge for consistent CT geometry.
         Returns reconstructed HU values.
         """
         from skimage.transform import radon, iradon
         
         original_shape = binary_slice.shape
         
-        # Pad to square for proper radon/iradon transform
-        max_dim = max(original_shape)
-        pad_h = max_dim - original_shape[0]
-        pad_w = max_dim - original_shape[1]
+        # Output will be a square based on the longer edge
+        output_size = max(original_shape[0], original_shape[1])
         
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
+        # Pad to diagonal size for proper radon/iradon transform
+        diag_len = int(np.ceil(np.sqrt(output_size**2 + output_size**2))) + 32
         
-        if pad_h > 0 or pad_w > 0:
-            padded_slice = np.pad(
+        # First pad to square (output_size x output_size)
+        pad_to_square_h = output_size - original_shape[0]
+        pad_to_square_w = output_size - original_shape[1]
+        sq_pad_top = pad_to_square_h // 2
+        sq_pad_left = pad_to_square_w // 2
+        
+        if pad_to_square_h > 0 or pad_to_square_w > 0:
+            square_slice = np.pad(
                 binary_slice,
-                ((pad_top, pad_bottom), (pad_left, pad_right)),
+                ((sq_pad_top, pad_to_square_h - sq_pad_top), 
+                 (sq_pad_left, pad_to_square_w - sq_pad_left)),
                 mode='constant',
                 constant_values=0
             )
         else:
-            padded_slice = binary_slice
+            square_slice = binary_slice
+        
+        # Then pad to diagonal for radon transform
+        diag_pad = diag_len - output_size
+        diag_pad_half = diag_pad // 2
+        
+        if diag_pad > 0:
+            padded_slice = np.pad(
+                square_slice,
+                ((diag_pad_half, diag_pad - diag_pad_half), 
+                 (diag_pad_half, diag_pad - diag_pad_half)),
+                mode='constant',
+                constant_values=0
+            )
+        else:
+            padded_slice = square_slice
+            diag_pad_half = 0
         
         # Calculate path length through material using Radon transform
-        path_lengths = radon(padded_slice.astype(np.float64), theta=self.theta)
+        path_lengths = radon(padded_slice.astype(np.float64), theta=self.theta, circle=False)
         
         # Polychromatic projection
         max_path = path_lengths.max() * 1.1 if path_lengths.max() > 0 else 100
@@ -334,20 +356,20 @@ class PhysicalCTSimulator:
         I_ratio = I_noisy / self.config.photon_count
         sinogram = -np.log(np.maximum(I_ratio, 1e-10))
         
-        # Filtered back projection - output_size must match padded input
-        reconstructed = iradon(sinogram, theta=self.theta, filter_name='ramp', output_size=max_dim)
+        # Filtered back projection
+        reconstructed = iradon(sinogram, theta=self.theta, filter_name='ramp', output_size=diag_len, circle=False)
         
-        # Crop back to original shape
-        if pad_h > 0 or pad_w > 0:
+        # Crop back to output_size x output_size (square)
+        if diag_pad > 0:
             reconstructed = reconstructed[
-                pad_top:pad_top + original_shape[0],
-                pad_left:pad_left + original_shape[1]
+                diag_pad_half:diag_pad_half + output_size,
+                diag_pad_half:diag_pad_half + output_size
             ]
         
         # Convert to Hounsfield Units
         hu_slice = 1000 * (reconstructed - self._mu_water_effective) / self._mu_water_effective
         
-        return hu_slice.astype(np.float32)
+        return hu_slice.astype(np.float32), output_size
     
     def _simulate_gpu(
         self,
@@ -362,9 +384,13 @@ class PhysicalCTSimulator:
         GPU-accelerated simulation for all slices.
         
         Uses CuPy for vectorized Radon/iRadon transforms.
+        Output is always square (based on max of H, W).
         """
         num_slices = volume_data.shape[2]
         h, w = volume_data.shape[:2]
+        
+        # Output will be square based on longer edge
+        output_size = max(h, w)
         
         # Pre-compute on GPU
         mu_obj_gpu = cp.asarray(mu_object, dtype=cp.float32)
@@ -373,15 +399,15 @@ class PhysicalCTSimulator:
         theta_gpu = cp.asarray(self.theta, dtype=cp.float32)
         photon_count = self.config.photon_count
         
-        # Output array
-        reconstructed = np.zeros((h, w, num_slices), dtype=np.float32)
+        # Output array (square slices)
+        reconstructed = np.zeros((output_size, output_size, num_slices), dtype=np.float32)
         
         # Process slices (could batch for even more speed)
         for slice_idx in range(num_slices):
             slice_2d = cp.asarray(volume_data[:, :, slice_idx], dtype=cp.float32)
             
-            # GPU slice simulation
-            recon_gpu = self._simulate_slice_gpu(
+            # GPU slice simulation (returns square slice)
+            recon_gpu, _ = self._simulate_slice_gpu(
                 slice_2d, mu_obj_gpu, mu_bg_gpu,
                 weights_gpu, theta_gpu, photon_count
             )
@@ -405,29 +431,50 @@ class PhysicalCTSimulator:
     ) -> "cp.ndarray":
         """
         Simulate CT for a single slice on GPU with polychromatic physics.
+        
+        Output is always a square based on the longer edge for consistent CT geometry.
         """
         original_shape = slice_gpu.shape
         
-        # Pad to square
-        max_dim = max(original_shape)
-        diag_len = int(cp.ceil(cp.sqrt(original_shape[0]**2 + original_shape[1]**2)))
+        # Output will be a square based on the longer edge
+        output_size = max(original_shape[0], original_shape[1])
         
-        pad_h = diag_len - original_shape[0]
-        pad_w = diag_len - original_shape[1]
-        pad_top = pad_h // 2
-        pad_left = pad_w // 2
+        # Pad to diagonal size for proper radon/iradon transform
+        # Add safety margin to prevent edge artifacts
+        diag_len = int(cp.ceil(cp.sqrt(output_size**2 + output_size**2))) + 32
         
-        if pad_h > 0 or pad_w > 0:
-            padded_slice = cp.pad(
+        # First pad to square (output_size x output_size)
+        pad_to_square_h = output_size - original_shape[0]
+        pad_to_square_w = output_size - original_shape[1]
+        sq_pad_top = pad_to_square_h // 2
+        sq_pad_left = pad_to_square_w // 2
+        
+        if pad_to_square_h > 0 or pad_to_square_w > 0:
+            square_slice = cp.pad(
                 slice_gpu,
-                ((pad_top, pad_h - pad_top), (pad_left, pad_w - pad_left)),
+                ((sq_pad_top, pad_to_square_h - sq_pad_top), 
+                 (sq_pad_left, pad_to_square_w - sq_pad_left)),
                 mode='constant',
                 constant_values=0.0
             )
         else:
-            padded_slice = slice_gpu
-            pad_top = 0
-            pad_left = 0
+            square_slice = slice_gpu
+        
+        # Then pad to diagonal for radon transform
+        diag_pad = diag_len - output_size
+        diag_pad_half = diag_pad // 2
+        
+        if diag_pad > 0:
+            padded_slice = cp.pad(
+                square_slice,
+                ((diag_pad_half, diag_pad - diag_pad_half), 
+                 (diag_pad_half, diag_pad - diag_pad_half)),
+                mode='constant',
+                constant_values=0.0
+            )
+        else:
+            padded_slice = square_slice
+            diag_pad_half = 0
         
         # Forward projection (Radon) - vectorized on GPU
         path_lengths = self._radon_gpu(padded_slice, theta_gpu)
@@ -467,29 +514,40 @@ class PhysicalCTSimulator:
         # Inverse Radon (FBP) on GPU
         reconstructed = self._iradon_gpu(sinogram, theta_gpu, diag_len)
         
-        # Crop back
-        if pad_h > 0 or pad_w > 0:
+        # Crop back to output_size x output_size (square)
+        if diag_pad > 0:
             reconstructed = reconstructed[
-                pad_top:pad_top + original_shape[0],
-                pad_left:pad_left + original_shape[1]
+                diag_pad_half:diag_pad_half + output_size,
+                diag_pad_half:diag_pad_half + output_size
             ]
         
         # Convert to HU
         hu_slice = 1000 * (reconstructed - self._mu_water_effective) / self._mu_water_effective
         
-        return hu_slice.astype(cp.float32)
+        return hu_slice.astype(cp.float32), output_size
     
     def _radon_gpu(self, image_gpu: "cp.ndarray", theta_deg: "cp.ndarray") -> "cp.ndarray":
-        """Vectorized GPU Radon transform."""
+        """Vectorized GPU Radon transform with diagonal-based detector size."""
         H, W = image_gpu.shape
-        size = H
+        
+        # Compute detector count based on image diagonal (matching skimage behavior)
+        n_det = int(cp.ceil(cp.sqrt(H**2 + W**2)))
         n_angles = len(theta_deg)
         
         theta_rad = theta_deg * (cp.pi / 180.0)
-        center = (size - 1) / 2.0
-        det_coords = cp.arange(size, dtype=cp.float32) - center
-        s_coords = cp.arange(size, dtype=cp.float32) - center
         
+        # Image center
+        img_center_x = (W - 1) / 2.0
+        img_center_y = (H - 1) / 2.0
+        
+        # Detector coordinates centered at 0
+        det_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
+        
+        # Ray path coordinates (s along the ray direction)
+        # Must use n_det (diagonal length) to ensure rays fully traverse the image at all angles
+        s_coords = cp.arange(n_det, dtype=cp.float32) - (n_det - 1) / 2.0
+        
+        # Reshape for broadcasting: (n_angles, n_det, n_s)
         theta = theta_rad.reshape(-1, 1, 1)
         t = det_coords.reshape(1, -1, 1)
         s = s_coords.reshape(1, 1, -1)
@@ -497,8 +555,14 @@ class PhysicalCTSimulator:
         cos_t = cp.cos(theta)
         sin_t = cp.sin(theta)
         
-        x_coords = -t * sin_t + s * cos_t + center
-        y_coords = t * cos_t + s * sin_t + center
+        # Compute sampling coordinates in image space
+        # Standard Radon transform coordinate mapping:
+        # x = t * cos(theta) - s * sin(theta)
+        # y = t * sin(theta) + s * cos(theta)
+        # s is the integration variable (along the ray)
+        # t is the detector position (perpendicular to ray)
+        x_coords = t * cos_t - s * sin_t + img_center_x
+        y_coords = t * sin_t + s * cos_t + img_center_y
         
         # Bilinear interpolation
         x0 = cp.floor(x_coords).astype(cp.int32)
@@ -528,6 +592,7 @@ class PhysicalCTSimulator:
             v11 * wx * wy
         ) * valid_mask
         
+        # Sum along ray path and transpose to (n_det, n_angles)
         return samples.sum(axis=2).T.astype(cp.float32)
     
     def _iradon_gpu(self, sinogram_gpu: "cp.ndarray", theta_deg: "cp.ndarray", output_size: int) -> "cp.ndarray":
