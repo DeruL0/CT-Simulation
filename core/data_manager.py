@@ -11,7 +11,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from loaders.stl_loader import STLLoader
-from simulation.ct_simulator import CTVolume
+from simulation.volume import CTVolume
 from simulation.voxelizer import VoxelGrid
 
 

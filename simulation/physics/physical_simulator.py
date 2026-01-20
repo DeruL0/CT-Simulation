@@ -31,9 +31,11 @@ from .attenuation import get_attenuation_database
 from .physical_material import (
     PhysicalMaterial, 
     PHYSICAL_MATERIALS,
+    PHYSICAL_MATERIALS,
     material_type_to_physical
 )
 from ..backends.radon_kernels import GPURadonTransform, HAS_CUPY as RADON_HAS_CUPY
+from ..backends import get_backend
 
 
 @dataclass
@@ -128,6 +130,9 @@ class PhysicalCTSimulator:
             f"{self.config.filtration_mm_al} mm Al, "
             f"mean energy: {self._spectrum.mean_energy:.1f} keV"
         )
+        
+        # Initialize backend (defaults to CPU if not using GPU path)
+        self._backend = get_backend(use_gpu=False)
     
     def _detect_gpu_memory(self) -> None:
         """Detect GPU memory and log available VRAM."""
@@ -224,7 +229,7 @@ class PhysicalCTSimulator:
         Returns:
             CTVolume with reconstructed HU values
         """
-        from ..ct_simulator import CTVolume
+        from ..volume import CTVolume
         
         start_time = time.perf_counter()
         
@@ -379,7 +384,8 @@ class PhysicalCTSimulator:
             diag_pad_half = 0
         
         # Calculate path length through material using Radon transform
-        path_lengths = radon(padded_slice.astype(np.float64), theta=self.theta, circle=False)
+        # Use CPU backend
+        path_lengths = self._backend.radon(padded_slice.astype(np.float64), theta=self.theta)
         
         # Polychromatic projection
         max_path = path_lengths.max() * 1.1 if path_lengths.max() > 0 else 100
@@ -416,7 +422,7 @@ class PhysicalCTSimulator:
         sinogram = -np.log(np.maximum(I_ratio, 1e-10))
         
         # Filtered back projection
-        reconstructed = iradon(sinogram, theta=self.theta, filter_name='ramp', output_size=diag_len, circle=False)
+        reconstructed = self._backend.iradon(sinogram, theta=self.theta, output_size=diag_len)
         
         # Crop back to output_size x output_size (square)
         if diag_pad > 0:

@@ -8,7 +8,7 @@ DICOM export has been moved to exporters.dicom.
 
 from .voxelizer import Voxelizer, VoxelGrid
 from .materials import MaterialDatabase, MaterialType, Material
-from .ct_simulator import CTSimulator, CTVolume
+from .volume import CTVolume
 
 # Physics simulation
 from .physics import (
@@ -29,7 +29,6 @@ __all__ = [
     "MaterialDatabase",
     "MaterialType",
     "Material", 
-    "CTSimulator",
     "CTVolume",
     # Physics
     "PhysicalCTSimulator",
@@ -37,4 +36,3 @@ __all__ = [
     "SpectrumGenerator",
     "XRaySpectrum",
 ]
-

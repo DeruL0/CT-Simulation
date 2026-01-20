@@ -24,7 +24,7 @@ from .panels.structure_panel import StructurePanel
 from .workers import SimulationWorker, ExportWorker
 
 from loaders.stl_loader import STLLoader
-from simulation.ct_simulator import CTVolume
+from simulation.volume import CTVolume
 from visualization import MeshViewer
 
 

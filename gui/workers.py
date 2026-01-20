@@ -12,7 +12,8 @@ from PySide6.QtCore import QThread, Signal
 
 from loaders.stl_loader import STLLoader
 from simulation.voxelizer import Voxelizer
-from simulation.ct_simulator import CTSimulator, CTVolume
+from simulation.volume import CTVolume
+# CTSimulator is deprecated, usage replaced by PhysicalCTSimulator
 from exporters.dicom import DICOMExporter
 
 
