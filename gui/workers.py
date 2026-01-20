@@ -107,7 +107,9 @@ class SimulationWorker(QThread):
             
             total_start = time.perf_counter()
             
-            # Voxelization (skip if pre-computed grid provided)
+            # ===== PHASE 1: Voxelization =====
+            logging.info("=" * 50)
+            logging.info("PHASE 1: Voxelization")
             self.progress.emit(0.0)
             
             if self.voxel_grid is not None:
@@ -121,7 +123,7 @@ class SimulationWorker(QThread):
                     origin=self.voxel_grid.origin.copy()
                 )
                 timing_info['voxelization_time'] = 0.0
-                logging.info("Using cloned pre-computed voxel grid from StructurePanel")
+                logging.info(f"  Using cloned pre-computed voxel grid: {voxel_grid.shape}")
             else:
                 # Voxelize from mesh
                 vox_start = time.perf_counter()
@@ -132,9 +134,12 @@ class SimulationWorker(QThread):
                 )
                 voxel_grid = voxelizer.voxelize(self.mesh)
                 timing_info['voxelization_time'] = time.perf_counter() - vox_start
+                logging.info(f"  Voxelized: {voxel_grid.shape} in {timing_info['voxelization_time']:.2f}s")
             
-            # Deferred Structure Generation
+            # ===== PHASE 2: Deferred Structure Generation =====
             if self.structure_config is not None:
+                logging.info("=" * 50)
+                logging.info("PHASE 2: Structure Generation")
                 struct_start = time.perf_counter()
                 self.progress.emit(0.1) # Start structure gen
                 
@@ -142,27 +147,43 @@ class SimulationWorker(QThread):
                 from simulation.structures import StructureModifier
                 modifier = StructureModifier(voxel_grid)
                 
-                # Progress wrapper for structure generation
+                # Progress wrapper for structure generation with logging
+                last_log_time = [time.perf_counter()]
                 def struct_progress(p):
                     # Map 0-1 to 0.1-0.3
                     self.progress.emit(0.1 + p * 0.2)
+                    now = time.perf_counter()
+                    if now - last_log_time[0] > 2.0:
+                        logging.info(f"  Structure progress: {p*100:.1f}%")
+                        last_log_time[0] = now
                 
-                logging.info(f"Applying deferred structure generation: {method_name}")
+                logging.info(f"  Method: {method_name}")
+                logging.info(f"  preserve_shell={getattr(config, 'preserve_shell', False)}, "
+                            f"shell_thickness={getattr(config, 'shell_thickness_mm', 0)}mm")
+                
                 if method_name == "generate_lattice":
                     modifier.generate_lattice(config, progress_callback=struct_progress)
                 elif method_name == "generate_random_voids":
                     modifier.generate_random_voids(config, progress_callback=struct_progress)
                     
                 timing_info['structure_time'] = time.perf_counter() - struct_start
+                logging.info(f"  Structure generation completed in {timing_info['structure_time']:.2f}s")
                 voxel_grid = modifier.grid
                 
             self.progress.emit(0.3)  # Ready for sim
             
-            # CT Simulation
+            # ===== PHASE 3: CT Simulation =====
+            logging.info("=" * 50)
+            logging.info("PHASE 3: CT Simulation")
             sim_start = time.perf_counter()
             
+            last_sim_log = [time.perf_counter()]
             def sim_progress(p):
-                self.progress.emit(0.2 + p * 0.8)
+                self.progress.emit(0.3 + p * 0.7)
+                now = time.perf_counter()
+                if now - last_sim_log[0] > 2.0:
+                    logging.info(f"  Simulation progress: {p*100:.1f}%")
+                    last_sim_log[0] = now
             
             if self.physics_mode:
                 # Use physical simulation with polychromatic physics
@@ -217,6 +238,17 @@ class SimulationWorker(QThread):
             # Get GPU-specific timing if available
             if hasattr(simulator, '_last_gpu_timing'):
                 timing_info['gpu_timing'] = simulator._last_gpu_timing
+            
+            # ===== Summary =====
+            logging.info("=" * 50)
+            logging.info("TIMING SUMMARY:")
+            logging.info(f"  Voxelization:     {timing_info['voxelization_time']:.2f}s")
+            logging.info(f"  Structure Gen:    {timing_info['structure_time']:.2f}s")
+            logging.info(f"  CT Simulation:    {timing_info['simulation_time']:.2f}s")
+            logging.info(f"  TOTAL:            {timing_info['total_time']:.2f}s")
+            if timing_info.get('gpu_timing'):
+                logging.info(f"  GPU Details: {timing_info['gpu_timing']}")
+            logging.info("=" * 50)
             
             self.progress.emit(1.0)
             self.finished.emit(ct_volume, timing_info)

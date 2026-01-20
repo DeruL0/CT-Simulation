@@ -156,15 +156,20 @@ class StructurePanel(QWidget):
         """
         Get the configuration for the currently active structure generation mode.
         Returns:
-            (method_name, config_object) or None if Manual/None selected.
+            (method_name, config_object) or None if Disabled/Manual/None selected.
         """
+        if not self._struct_group.isChecked():
+            return None
+        
         idx = self._stack.currentIndex()
         
         if idx == 0:  # Lattice
             config = LatticeConfig(
                 lattice_type=self._lattice_type_combo.currentData(),
                 density_percent=self._lattice_density_spin.value(),
-                cell_size_mm=self._cell_size_spin.value()
+                cell_size_mm=self._cell_size_spin.value(),
+                preserve_shell=self._lattice_preserve_shell_check.isChecked(),
+                shell_thickness_mm=self._lattice_shell_thickness_spin.value()
             )
             return ("generate_lattice", config)
             
@@ -173,7 +178,9 @@ class StructurePanel(QWidget):
                 shape=self._defect_shape_combo.currentData(),
                 density_percent=self._porosity_spin.value(),
                 size_mean_mm=self._pore_size_spin.value(),
-                size_std_mm=self._pore_std_spin.value()
+                size_std_mm=self._pore_std_spin.value(),
+                preserve_shell=self._defects_preserve_shell_check.isChecked(),
+                shell_thickness_mm=self._defects_shell_thickness_spin.value()
             )
             return ("generate_random_voids", config)
             
@@ -238,6 +245,22 @@ class StructurePanel(QWidget):
         density_layout.addWidget(self._lattice_density_spin)
         form_layout.addRow("Density:", density_widget)
         
+        # Shell Preservation
+        from PySide6.QtWidgets import QCheckBox
+        self._lattice_preserve_shell_check = QCheckBox("Preserve Outer Shell")
+        form_layout.addRow("", self._lattice_preserve_shell_check)
+        
+        self._lattice_shell_thickness_spin = QDoubleSpinBox()
+        self._lattice_shell_thickness_spin.setRange(0.1, 20.0)
+        self._lattice_shell_thickness_spin.setValue(1.0)
+        self._lattice_shell_thickness_spin.setSuffix(" mm")
+        self._lattice_shell_thickness_spin.setEnabled(False)
+        form_layout.addRow("Shell Thickness:", self._lattice_shell_thickness_spin)
+        
+        self._lattice_preserve_shell_check.toggled.connect(
+            self._lattice_shell_thickness_spin.setEnabled
+        )
+        
         main_layout.addLayout(form_layout)
         
         # Removed Generate button
@@ -298,6 +321,22 @@ class StructurePanel(QWidget):
         self._pore_std_spin.setValue(0.5)
         self._pore_std_spin.setSuffix(" mm")
         form_layout.addRow("Size Std:", self._pore_std_spin)
+        
+        # Shell Preservation
+        from PySide6.QtWidgets import QCheckBox
+        self._defects_preserve_shell_check = QCheckBox("Preserve Outer Shell")
+        form_layout.addRow("", self._defects_preserve_shell_check)
+        
+        self._defects_shell_thickness_spin = QDoubleSpinBox()
+        self._defects_shell_thickness_spin.setRange(0.1, 20.0)
+        self._defects_shell_thickness_spin.setValue(1.0)
+        self._defects_shell_thickness_spin.setSuffix(" mm")
+        self._defects_shell_thickness_spin.setEnabled(False)
+        form_layout.addRow("Shell Thickness:", self._defects_shell_thickness_spin)
+        
+        self._defects_preserve_shell_check.toggled.connect(
+            self._defects_shell_thickness_spin.setEnabled
+        )
         
         main_layout.addLayout(form_layout)
         

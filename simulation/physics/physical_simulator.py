@@ -116,11 +116,69 @@ class PhysicalCTSimulator:
         # Water attenuation for HU conversion
         self._mu_water_effective = self._calculate_effective_mu("water")
         
+        # GPU memory detection for dynamic batch sizing
+        self._gpu_total_mem = 0
+        self._gpu_free_mem = 0
+        if self.config.use_gpu and HAS_CUPY:
+            self._detect_gpu_memory()
+        
         logging.info(
             f"PhysicalCTSimulator initialized: {self.config.kvp} kVp, "
             f"{self.config.filtration_mm_al} mm Al, "
             f"mean energy: {self._spectrum.mean_energy:.1f} keV"
         )
+    
+    def _detect_gpu_memory(self) -> None:
+        """Detect GPU memory and log available VRAM."""
+        try:
+            mempool = cp.get_default_memory_pool()
+            # Get device memory info
+            device = cp.cuda.Device()
+            self._gpu_total_mem = device.mem_info[1]  # Total memory in bytes
+            self._gpu_free_mem = device.mem_info[0]   # Free memory in bytes
+            
+            total_gb = self._gpu_total_mem / (1024**3)
+            free_gb = self._gpu_free_mem / (1024**3)
+            logging.info(f"  GPU Memory: {free_gb:.1f}/{total_gb:.1f} GB available")
+        except Exception as e:
+            logging.warning(f"Could not detect GPU memory: {e}")
+            self._gpu_total_mem = 8 * (1024**3)  # Default 8GB
+            self._gpu_free_mem = 6 * (1024**3)   # Conservative estimate
+    
+    def _calculate_batch_sizes(self, image_size: int) -> Tuple[int, int, int]:
+        """
+        Calculate optimal batch sizes based on available GPU memory and image size.
+        
+        Returns:
+            (slice_batch, radon_batch, iradon_batch)
+        """
+        # Memory estimation per operation (empirical)
+        # Radon: ~6 arrays of (batch_angles, n_det, n_det) float32 = batch * n_det^2 * 24 bytes
+        # iRadon: ~4 arrays of (batch_angles, output_size^2) float32 = batch * size^2 * 16 bytes
+        
+        n_det = int(np.ceil(np.sqrt(2) * image_size)) + 32  # Diagonal + padding
+        
+        # Use 60% of free memory as safety margin
+        available = self._gpu_free_mem * 0.6 if self._gpu_free_mem > 0 else 4 * (1024**3)
+        
+        # Calculate Radon batch size
+        # Each angle needs ~6 arrays of (n_det, n_det) floats
+        mem_per_radon_angle = n_det * n_det * 6 * 4  # bytes
+        radon_batch = max(5, min(60, int(available / (mem_per_radon_angle * 4))))
+        
+        # Calculate iRadon batch size  
+        # Each angle needs ~4 arrays of (output_size^2) floats
+        mem_per_iradon_angle = image_size * image_size * 4 * 4  # bytes
+        iradon_batch = max(10, min(120, int(available / (mem_per_iradon_angle * 2))))
+        
+        # Calculate slice batch size
+        # Each slice needs ~2x the slice data + intermediate buffers
+        mem_per_slice = image_size * image_size * 4 * 10  # Conservative estimate
+        slice_batch = max(1, min(16, int(available / (mem_per_slice * 8))))
+        
+        logging.info(f"  Auto batch sizes: slices={slice_batch}, radon={radon_batch}, iradon={iradon_batch}")
+        
+        return slice_batch, radon_batch, iradon_batch
     
     def _calculate_effective_mu(self, material: str) -> float:
         """
@@ -381,9 +439,10 @@ class PhysicalCTSimulator:
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> np.ndarray:
         """
-        GPU-accelerated simulation for all slices.
+        GPU-accelerated simulation for all slices with batch processing.
         
         Uses CuPy for vectorized Radon/iRadon transforms.
+        Processes slices in batches to reduce kernel launch overhead.
         Output is always square (based on max of H, W).
         """
         num_slices = volume_data.shape[2]
@@ -392,31 +451,62 @@ class PhysicalCTSimulator:
         # Output will be square based on longer edge
         output_size = max(h, w)
         
-        # Pre-compute on GPU
+        # Calculate dynamic batch sizes based on GPU memory
+        slice_batch, self._radon_batch, self._iradon_batch = self._calculate_batch_sizes(output_size)
+        
+        # Pre-compute on GPU (cached for all slices)
         mu_obj_gpu = cp.asarray(mu_object, dtype=cp.float32)
         mu_bg_gpu = cp.asarray(mu_background, dtype=cp.float32)
         weights_gpu = cp.asarray(bin_weights, dtype=cp.float32)
         theta_gpu = cp.asarray(self.theta, dtype=cp.float32)
         photon_count = self.config.photon_count
         
+        # Pre-compute geometry arrays (OPTIMIZATION: only once per simulation)
+        theta_rad = theta_gpu * (cp.pi / 180.0)
+        cos_theta = cp.cos(theta_rad)
+        sin_theta = cp.sin(theta_rad)
+        
+        # Cache geometry in instance for batch processing
+        self._cached_cos_theta = cos_theta
+        self._cached_sin_theta = sin_theta
+        
         # Output array (square slices)
         reconstructed = np.zeros((output_size, output_size, num_slices), dtype=np.float32)
         
-        # Process slices (could batch for even more speed)
-        for slice_idx in range(num_slices):
-            slice_2d = cp.asarray(volume_data[:, :, slice_idx], dtype=cp.float32)
+        # Dynamic batch processing based on detected GPU memory
+        BATCH_SIZE = slice_batch
+        
+        logging.info(f"  GPU batch processing {num_slices} slices (batch_size={BATCH_SIZE})")
+        
+        completed = 0
+        for batch_start in range(0, num_slices, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, num_slices)
+            batch_slices = batch_end - batch_start
             
-            # GPU slice simulation (returns square slice)
-            recon_gpu, _ = self._simulate_slice_gpu(
-                slice_2d, mu_obj_gpu, mu_bg_gpu,
-                weights_gpu, theta_gpu, photon_count
-            )
+            # Transfer entire batch to GPU at once
+            batch_data = cp.asarray(volume_data[:, :, batch_start:batch_end], dtype=cp.float32)
             
-            # Transfer result back
-            reconstructed[:, :, slice_idx] = cp.asnumpy(recon_gpu)
+            # Process batch
+            batch_results = []
+            for i in range(batch_slices):
+                slice_2d = batch_data[:, :, i]
+                recon_gpu, _ = self._simulate_slice_gpu(
+                    slice_2d, mu_obj_gpu, mu_bg_gpu,
+                    weights_gpu, theta_gpu, photon_count
+                )
+                batch_results.append(recon_gpu)
             
+            # Stack and transfer batch back to CPU at once
+            batch_stack = cp.stack(batch_results, axis=2)
+            reconstructed[:, :, batch_start:batch_end] = cp.asnumpy(batch_stack)
+            
+            # Free GPU memory for this batch
+            del batch_data, batch_results, batch_stack
+            cp.get_default_memory_pool().free_all_blocks()
+            
+            completed += batch_slices
             if progress_callback:
-                progress_callback((slice_idx + 1) / num_slices)
+                progress_callback(completed / num_slices)
         
         return reconstructed
     
@@ -548,13 +638,8 @@ class PhysicalCTSimulator:
         # Output sinogram
         sinogram = cp.zeros((n_det, n_angles), dtype=cp.float32)
         
-        # Batch processing to save memory
-        # Detailed memory calculation:
-        # A 1024x1024 image -> n_det ~ 1450
-        # A chunk of size N uses: N * 1450 * 1450 * 4 bytes * 6 arrays (x, y, x0, y0, wx, wy)
-        # N=10 -> ~500MB. N=360 -> ~18GB (OOM!)
-        # Safe batch size ~ 5-10 angles depending on VRAM
-        BATCH_SIZE = 10 
+        # Dynamic batch size from GPU memory detection
+        BATCH_SIZE = getattr(self, '_radon_batch', 20)
         
         t = det_coords.reshape(1, -1, 1)
         s = s_coords.reshape(1, 1, -1)
@@ -652,13 +737,8 @@ class PhysicalCTSimulator:
         theta_rad_all = theta_deg * (cp.pi / 180.0)
         det_center = (n_det - 1) / 2.0
         
-        # Batch processing for backprojection
-        # Memory bottleneck: t_all (output_size^2) and broadcasted arrays
-        # 1024x1024 output -> 1M pixels.
-        # Batch size can be larger here than Radon since we sum into a single buffer
-        # But angle_idx broadcast is (1M x BATCH) floats.
-        # BATCH=10 -> 40MB. Safe.
-        BATCH_SIZE = 40
+        # Dynamic batch size from GPU memory detection
+        BATCH_SIZE = getattr(self, '_iradon_batch', 60)
         
         for i in range(0, n_angles, BATCH_SIZE):
             theta_chunk = theta_rad_all[i:i+BATCH_SIZE]
