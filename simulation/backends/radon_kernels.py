@@ -120,8 +120,10 @@ class GPURadonTransform:
             
             del samples, valid_mask, wx, wy, v00, v01, v10, v11
             del x0_clamped, x1_clamped, y0_clamped, y1_clamped
-            cp.get_default_memory_pool().free_all_blocks()
-            
+        
+        # Clean up memory pool once after all batches (avoids sync overhead)
+        cp.get_default_memory_pool().free_all_blocks()
+        
         return sinogram
     
     def iradon(self, sinogram_gpu: "cp.ndarray", theta_deg: "cp.ndarray", output_size: int) -> "cp.ndarray":
@@ -196,6 +198,8 @@ class GPURadonTransform:
             reconstructed += sampled.sum(axis=0)
             
             del t_all, t_idx, t_idx_floor, t_idx_ceil, t_frac, val_floor, val_ceil, sampled
-            cp.get_default_memory_pool().free_all_blocks()
-            
+        
+        # Clean up memory pool once after all batches (avoids sync overhead)
+        cp.get_default_memory_pool().free_all_blocks()
+        
         return reconstructed.reshape(output_size, output_size) * (cp.pi / (2 * n_angles))

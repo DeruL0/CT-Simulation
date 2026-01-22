@@ -10,7 +10,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from loaders.stl_loader import STLLoader
+from loaders import MeshLoader as STLLoader
 from simulation.voxelizer import Voxelizer
 from simulation.volume import CTVolume
 # CTSimulator is deprecated, usage replaced by PhysicalCTSimulator

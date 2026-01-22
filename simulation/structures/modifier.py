@@ -122,22 +122,36 @@ class StructureModifier:
         # Apply threshold
         lattice_mask = tpms_field > iso_value
         
-        if is_gpu:
-            lattice_mask = xp.asnumpy(lattice_mask)
-        
         if progress_callback: progress_callback(0.85)
         
         # Combine with solid mask and shell
-        if mask_to_solid:
-            modified = solid_mask_orig & lattice_mask
+        # GPU path: keep operations on GPU, transfer only final result
+        if is_gpu:
+            # solid_mask_orig_xp is already on GPU from iso_value calculation
+            if mask_to_solid:
+                modified_gpu = solid_mask_orig_xp & lattice_mask
+            else:
+                modified_gpu = lattice_mask
+            
+            if config.preserve_shell and inner_mask is not None:
+                inner_mask_gpu = xp.asarray(inner_mask)
+                shell_mask_gpu = solid_mask_orig_xp & ~inner_mask_gpu
+                final_gpu = xp.where(shell_mask_gpu | (inner_mask_gpu & modified_gpu), 1.0, 0.0)
+                self.grid.data = xp.asnumpy(final_gpu.astype(xp.float32))
+            else:
+                self.grid.data = xp.asnumpy(modified_gpu.astype(xp.float32))
         else:
-            modified = lattice_mask
-        
-        if config.preserve_shell and inner_mask is not None:
-            shell_mask = solid_mask_orig & ~inner_mask
-            self.grid.data = np.where(shell_mask | (inner_mask & modified), 1.0, 0.0).astype(np.float32)
-        else:
-            self.grid.data = modified.astype(np.float32)
+            # CPU path (unchanged)
+            if mask_to_solid:
+                modified = solid_mask_orig & lattice_mask
+            else:
+                modified = lattice_mask
+            
+            if config.preserve_shell and inner_mask is not None:
+                shell_mask = solid_mask_orig & ~inner_mask
+                self.grid.data = np.where(shell_mask | (inner_mask & modified), 1.0, 0.0).astype(np.float32)
+            else:
+                self.grid.data = modified.astype(np.float32)
         
         actual_density = np.mean(self.grid.data > 0.5) * 100
         logging.info(f"Lattice generated: actual density = {actual_density:.1f}%")

@@ -1,8 +1,8 @@
 """
-STL File Loader
+Generic Mesh Loader (STL, PLY, OBJ, etc.)
 
-Provides functionality to load and validate STL (Stereolithography) files
-for CT simulation.
+Provides unified functionality to load and validate 3D mesh files
+for CT simulation. Supports multiple formats via trimesh backend.
 """
 
 from pathlib import Path
@@ -12,7 +12,6 @@ import numpy as np
 import tempfile
 import hashlib
 import logging
-import pickle
 
 try:
     import trimesh
@@ -20,12 +19,9 @@ try:
 except ImportError:
     HAS_TRIMESH = False
 
-try:
-    from stl import mesh as stl_mesh
-    HAS_NUMPY_STL = True
-except ImportError:
-    HAS_NUMPY_STL = False
 
+# Supported mesh file extensions
+SUPPORTED_EXTENSIONS = {'.stl', '.ply', '.obj', '.off', '.glb', '.gltf'}
 
 # Module-level cache directory
 _CACHE_DIR = Path(tempfile.gettempdir()) / "ct_simulation_cache"
@@ -43,28 +39,37 @@ class MeshInfo:
     center: np.ndarray  # (3,) array [x, y, z] center point
     volume: Optional[float]  # Volume in mm³ (only for watertight meshes)
     is_watertight: bool
+    file_format: str  # Original file format (e.g., 'stl', 'ply', 'obj')
     
     def __str__(self) -> str:
+        vol_str = f"  Volume: {self.volume:.2f} mm³\n" if self.volume else ""
         return (
-            f"Mesh Info:\n"
+            f"Mesh Info ({self.file_format.upper()}):\n"
             f"  Vertices: {self.num_vertices:,}\n"
             f"  Faces: {self.num_faces:,}\n"
             f"  Dimensions: {self.dimensions[0]:.2f} x {self.dimensions[1]:.2f} x {self.dimensions[2]:.2f} mm\n"
-            f"  Volume: {self.volume:.2f} mm³\n" if self.volume else ""
+            f"{vol_str}"
             f"  Watertight: {self.is_watertight}"
         )
 
 
-class STLLoader:
+class MeshLoader:
     """
-    Loader for STL (Stereolithography) files.
+    Unified loader for 3D mesh files (STL, PLY, OBJ, OFF, GLB, GLTF).
     
-    Supports both ASCII and binary STL formats. Uses trimesh as the primary
-    backend with numpy-stl as fallback.
+    Uses trimesh as the backend for loading all supported formats.
+    Provides normalization, caching, and mesh information extraction.
     
     Attributes:
         mesh: The loaded trimesh.Trimesh object
         info: MeshInfo dataclass with mesh statistics
+    
+    Supported Formats:
+        - STL: Stereolithography (ASCII and binary)
+        - PLY: Polygon File Format (ASCII and binary)
+        - OBJ: Wavefront OBJ
+        - OFF: Object File Format
+        - GLB/GLTF: GL Transmission Format
     """
     
     # Class-level cache for quick access
@@ -73,13 +78,30 @@ class STLLoader:
     def __init__(self):
         if not HAS_TRIMESH:
             raise ImportError(
-                "trimesh is required for STL loading. "
+                "trimesh is required for mesh loading. "
                 "Install it with: pip install trimesh"
             )
         self.mesh: Optional[trimesh.Trimesh] = None
         self.info: Optional[MeshInfo] = None
         self._filepath: Optional[Path] = None
         self._cache_key: Optional[str] = None
+        self._file_format: str = ""
+    
+    @staticmethod
+    def get_supported_extensions() -> set:
+        """Get set of supported file extensions (with leading dot)."""
+        return SUPPORTED_EXTENSIONS.copy()
+    
+    @staticmethod
+    def get_file_filter() -> str:
+        """Get file filter string for file dialogs."""
+        extensions = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
+        return f"3D Mesh Files ({extensions})"
+    
+    @staticmethod
+    def is_supported(filepath: str | Path) -> bool:
+        """Check if a file extension is supported."""
+        return Path(filepath).suffix.lower() in SUPPORTED_EXTENSIONS
     
     @staticmethod
     def _compute_file_hash(filepath: Path) -> str:
@@ -166,6 +188,7 @@ class STLLoader:
             if len(meshes) == 1:
                 return meshes[0]
             else:
+                logging.info(f"Combining {len(meshes)} meshes into single mesh")
                 return trimesh.util.concatenate(meshes)
         
         raise ValueError(f"Unexpected mesh type: {type(mesh_or_scene)}")
@@ -178,10 +201,10 @@ class STLLoader:
         target_size_mm: float = 100.0
     ) -> trimesh.Trimesh:
         """
-        Load an STL file.
+        Load a 3D mesh file.
         
         Args:
-            filepath: Path to the STL file
+            filepath: Path to the mesh file (STL, PLY, OBJ, OFF, GLB, GLTF)
             use_cache: Whether to use disk caching (default True)
             auto_normalize: Whether to auto-scale mesh to target size (default True)
             target_size_mm: Target max dimension in mm when normalizing (default 100)
@@ -191,26 +214,33 @@ class STLLoader:
             
         Raises:
             FileNotFoundError: If the file doesn't exist
-            ValueError: If the file is not a valid STL
+            ValueError: If the file format is not supported or invalid
         """
         filepath = Path(filepath)
         
         if not filepath.exists():
-            raise FileNotFoundError(f"STL file not found: {filepath}")
+            raise FileNotFoundError(f"Mesh file not found: {filepath}")
         
-        if filepath.suffix.lower() != '.stl':
-            raise ValueError(f"Expected .stl file, got: {filepath.suffix}")
+        extension = filepath.suffix.lower()
+        if extension not in SUPPORTED_EXTENSIONS:
+            supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+            raise ValueError(
+                f"Unsupported file format: {extension}. "
+                f"Supported formats: {supported}"
+            )
+        
+        self._file_format = extension[1:]  # Remove leading dot
         
         # Compute cache key
         self._cache_key = self._compute_file_hash(filepath)
-        logging.info(f"Loading STL: {filepath.name} (hash: {self._cache_key[:8]}...)")
+        logging.info(f"Loading mesh: {filepath.name} (format: {self._file_format.upper()}, hash: {self._cache_key[:8]}...)")
         
         # Try to load from cache first
         if use_cache:
             cached_mesh = self._load_from_cache(self._cache_key)
             if cached_mesh is not None:
                 self.mesh = cached_mesh
-                # Apply normalization to cached mesh too (in case cache was from old version)
+                # Apply normalization to cached mesh too
                 if auto_normalize:
                     self._normalize_mesh(target_size_mm)
                 self._filepath = filepath
@@ -218,12 +248,13 @@ class STLLoader:
                 logging.info("Using cached mesh data.")
                 return self.mesh
         
-        # Load from STL file
-        logging.info("Loading from STL file (not cached)...")
+        # Load from file
+        logging.info(f"Loading from {self._file_format.upper()} file (not cached)...")
         try:
-            self.mesh = trimesh.load(filepath, file_type='stl')
+            # trimesh auto-detects format from extension
+            self.mesh = trimesh.load(filepath)
         except Exception as e:
-            raise ValueError(f"Failed to load STL file: {e}")
+            raise ValueError(f"Failed to load mesh file: {e}")
         
         # Ensure we have a Trimesh, not a Scene
         self.mesh = self._ensure_trimesh(self.mesh)
@@ -232,7 +263,7 @@ class STLLoader:
         if isinstance(self.mesh, trimesh.Scene):
             raise ValueError("Failed to convert Scene to Mesh")
         
-        # Auto-normalize mesh size if dimensions are unreasonable
+        # Auto-normalize mesh size
         if auto_normalize:
             self._normalize_mesh(target_size_mm)
             
@@ -324,6 +355,7 @@ class STLLoader:
             center=center,
             volume=volume,
             is_watertight=is_watertight,
+            file_format=self._file_format,
         )
     
     def get_vertices(self) -> np.ndarray:
@@ -362,3 +394,7 @@ class STLLoader:
     def filepath(self) -> Optional[Path]:
         """Get the path of the loaded file."""
         return self._filepath
+
+
+# Backwards compatibility alias
+STLLoader = MeshLoader

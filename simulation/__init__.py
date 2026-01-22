@@ -19,7 +19,7 @@ from .physics import (
 )
 
 # Re-export from loaders for backwards compatibility
-from loaders.stl_loader import STLLoader, MeshInfo
+from loaders import MeshLoader as STLLoader, MeshInfo
 
 __all__ = [
     "STLLoader", 

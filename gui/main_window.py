@@ -23,7 +23,7 @@ from .panels import STLPanel, ParamsPanel, ViewerPanel
 from .panels.structure_panel import StructurePanel
 from .workers import SimulationWorker, ExportWorker
 
-from loaders.stl_loader import STLLoader
+from loaders import MeshLoader as STLLoader
 from simulation.volume import CTVolume
 from visualization import MeshViewer
 

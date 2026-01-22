@@ -4,9 +4,16 @@ Loaders Package
 Contains data loading strategies for different file formats.
 """
 
-from .stl_loader import STLLoader, MeshInfo
+from .mesh_loader import (
+    MeshLoader,
+    MeshInfo,
+    STLLoader,  # Backwards compatibility alias
+    SUPPORTED_EXTENSIONS,
+)
 
 __all__ = [
-    'STLLoader',
+    'MeshLoader',
     'MeshInfo',
+    'STLLoader',  # Backwards compatibility alias
+    'SUPPORTED_EXTENSIONS',
 ]

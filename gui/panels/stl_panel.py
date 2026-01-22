@@ -1,7 +1,8 @@
 """
-STL Import Panel
+Mesh Import Panel
 
-Provides UI controls for importing and viewing STL file information.
+Provides UI controls for importing and viewing 3D mesh file information.
+Supports STL, PLY, OBJ, OFF, GLB, and GLTF formats.
 """
 
 from pathlib import Path
@@ -15,20 +16,20 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal
 
-from loaders.stl_loader import STLLoader, MeshInfo
+from loaders import MeshLoader, MeshInfo, SUPPORTED_EXTENSIONS
 from simulation.materials import MaterialType
 
 
 class STLPanel(QWidget):
-    """Panel for STL file import and material selection."""
+    """Panel for 3D mesh file import and material selection."""
     
-    # Signal emitted when a new STL file is loaded
-    stl_loaded = Signal(object)  # Emits the STLLoader object
+    # Signal emitted when a new mesh file is loaded
+    stl_loaded = Signal(object)  # Emits the MeshLoader object (signal name kept for compatibility)
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
-        self._loader: Optional[STLLoader] = None
+        self._loader: Optional[MeshLoader] = None
         self._setup_ui()
     
     def _setup_ui(self) -> None:
@@ -37,7 +38,7 @@ class STLPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         # Import section
-        import_group = QGroupBox("Import STL")
+        import_group = QGroupBox("Import 3D Mesh")
         import_layout = QVBoxLayout(import_group)
         
         # File selection
@@ -97,11 +98,15 @@ class STLPanel(QWidget):
     
     def _on_browse_clicked(self) -> None:
         """Handle browse button click."""
+        # Build file filter from supported extensions
+        ext_str = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
+        filter_str = f"3D Mesh Files ({ext_str});;STL Files (*.stl);;PLY Files (*.ply);;OBJ Files (*.obj);;All Files (*.*)"
+        
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select STL File",
+            "Select 3D Mesh File",
             "",
-            "STL Files (*.stl);;All Files (*.*)"
+            filter_str
         )
         
         if file_path:
@@ -109,16 +114,16 @@ class STLPanel(QWidget):
     
     def load_stl(self, file_path: str) -> bool:
         """
-        Load an STL file.
+        Load a 3D mesh file.
         
         Args:
-            file_path: Path to the STL file
+            file_path: Path to the mesh file (STL, PLY, OBJ, etc.)
             
         Returns:
             True if loading was successful
         """
         try:
-            self._loader = STLLoader()
+            self._loader = MeshLoader()
             self._loader.load(file_path)
             
             # Update file label
@@ -140,7 +145,7 @@ class STLPanel(QWidget):
             QMessageBox.critical(
                 self,
                 "Import Error",
-                f"Failed to load STL file:\n\n{str(e)}"
+                f"Failed to load mesh file:\n\n{str(e)}"
             )
             return False
     
@@ -176,8 +181,8 @@ class STLPanel(QWidget):
         self._watertight_label.setText("-")
     
     @property
-    def loader(self) -> Optional[STLLoader]:
-        """Get the current STL loader."""
+    def loader(self) -> Optional[MeshLoader]:
+        """Get the current mesh loader."""
         return self._loader
     
     @property

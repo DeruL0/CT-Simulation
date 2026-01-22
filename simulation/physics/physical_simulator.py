@@ -488,35 +488,66 @@ class PhysicalCTSimulator:
         
         logging.info(f"  GPU batch processing {num_slices} slices (batch_size={BATCH_SIZE})")
         
+        # Create streams for overlapped transfer
+        compute_stream = cp.cuda.Stream(non_blocking=True)
+        transfer_stream = cp.cuda.Stream(non_blocking=True)
+        
         completed = 0
+        prev_batch_stack = None
+        prev_batch_start = 0
+        prev_batch_end = 0
+        
         for batch_start in range(0, num_slices, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, num_slices)
             batch_slices = batch_end - batch_start
             
-            # Transfer entire batch to GPU at once
-            batch_data = cp.asarray(volume_data[:, :, batch_start:batch_end], dtype=cp.float32)
+            # Transfer batch to GPU (can overlap with previous D2H)
+            with transfer_stream:
+                batch_data = cp.asarray(volume_data[:, :, batch_start:batch_end], dtype=cp.float32)
             
-            # Process batch
-            batch_results = []
-            for i in range(batch_slices):
-                slice_2d = batch_data[:, :, i]
-                recon_gpu, _ = self._simulate_slice_gpu(
-                    slice_2d, mu_obj_gpu, mu_bg_gpu,
-                    weights_gpu, theta_gpu, photon_count
-                )
-                batch_results.append(recon_gpu)
+            # Wait for transfer to complete before compute
+            compute_stream.wait_event(transfer_stream.record())
             
-            # Stack and transfer batch back to CPU at once
-            batch_stack = cp.stack(batch_results, axis=2)
-            reconstructed[:, :, batch_start:batch_end] = cp.asnumpy(batch_stack)
+            # Process batch on compute stream
+            with compute_stream:
+                batch_results = []
+                for i in range(batch_slices):
+                    slice_2d = batch_data[:, :, i]
+                    recon_gpu, _ = self._simulate_slice_gpu(
+                        slice_2d, mu_obj_gpu, mu_bg_gpu,
+                        weights_gpu, theta_gpu, photon_count
+                    )
+                    batch_results.append(recon_gpu)
+                
+                batch_stack = cp.stack(batch_results, axis=2)
             
-            # Free GPU memory for this batch
-            del batch_data, batch_results, batch_stack
-            cp.get_default_memory_pool().free_all_blocks()
+            # Transfer previous batch back to CPU while current batch computes
+            if prev_batch_stack is not None:
+                with transfer_stream:
+                    # Wait for previous compute to finish
+                    transfer_stream.wait_event(compute_stream.record())
+                    reconstructed[:, :, prev_batch_start:prev_batch_end] = cp.asnumpy(prev_batch_stack)
+                    del prev_batch_stack
+            
+            prev_batch_stack = batch_stack
+            prev_batch_start = batch_start
+            prev_batch_end = batch_end
+            
+            # Clean up current batch input
+            del batch_data, batch_results
             
             completed += batch_slices
             if progress_callback:
                 progress_callback(completed / num_slices)
+        
+        # Transfer final batch
+        if prev_batch_stack is not None:
+            compute_stream.synchronize()
+            reconstructed[:, :, prev_batch_start:prev_batch_end] = cp.asnumpy(prev_batch_stack)
+            del prev_batch_stack
+        
+        # Final memory cleanup
+        cp.get_default_memory_pool().free_all_blocks()
         
         return reconstructed
     
