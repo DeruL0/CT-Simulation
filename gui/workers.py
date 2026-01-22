@@ -7,14 +7,17 @@ QThread workers for long-running operations (loading, simulation, export).
 import logging
 import time
 from typing import Optional
+import numpy as np
 
 from PySide6.QtCore import QThread, Signal
 
 from loaders import MeshLoader as STLLoader
-from simulation.voxelizer import Voxelizer
+from simulation.voxelizer import Voxelizer, VoxelGrid
 from simulation.volume import CTVolume
-# CTSimulator is deprecated, usage replaced by PhysicalCTSimulator
+from simulation.backends import get_backend
+from simulation.simple_simulator import SimpleCTSimulator
 from exporters.dicom import DICOMExporter
+
 
 
 class LoaderWorker(QThread):
@@ -48,7 +51,7 @@ class SimulationWorker(QThread):
     """Background worker for CT simulation."""
     
     progress = Signal(float)
-    finished = Signal(object, dict)  # Emits (CTVolume, timing_info)
+    finished = Signal(object, dict, list)  # Emits (CTVolume, timing_info, compression_results)
     error = Signal(str)
     
     def __init__(
@@ -69,7 +72,8 @@ class SimulationWorker(QThread):
         physics_filtration: float = 2.5,
         physics_energy_bins: int = 10,
         voxel_grid=None,  # Optional pre-computed VoxelGrid
-        structure_config=None  # Optional (method_name, config) for deferred generation
+        structure_config=None,  # Optional (method_name, config) for deferred generation
+        compression_config=None  # Optional dict from CompressionPanel.get_config()
     ):
         super().__init__()
         self.mesh = mesh
@@ -92,6 +96,8 @@ class SimulationWorker(QThread):
         self.voxel_grid = voxel_grid
         # Deferred structure configuration
         self.structure_config = structure_config
+        # Compression configuration
+        self.compression_config = compression_config
     
     def run(self):
         try:
@@ -210,21 +216,9 @@ class SimulationWorker(QThread):
                 )
                 
             elif self.fast_mode:
-                simulator = CTSimulator(
+                # Fast mode: use SimpleCTSimulator (no physics, just radon/iradon)
+                simulator = SimpleCTSimulator(
                     num_projections=self.num_projections,
-                    add_noise=self.add_noise,
-                    noise_level=self.noise_level,
-                    use_gpu=self.use_gpu
-                )
-                ct_volume = simulator.simulate_fast(
-                    voxel_grid,
-                    material=self.material
-                )
-            else:
-                simulator = CTSimulator(
-                    num_projections=self.num_projections,
-                    add_noise=self.add_noise,
-                    noise_level=self.noise_level,
                     use_gpu=self.use_gpu
                 )
                 ct_volume = simulator.simulate(
@@ -232,13 +226,106 @@ class SimulationWorker(QThread):
                     material=self.material,
                     progress_callback=sim_progress
                 )
+            else:
+                # Normal mode: use PhysicalCTSimulator with default config
+                from simulation.physics import PhysicalCTSimulator, PhysicsConfig
+                
+                physics_config = PhysicsConfig(
+                    kvp=120,
+                    tube_current_ma=200,
+                    use_gpu=self.use_gpu
+                )
+                
+                simulator = PhysicalCTSimulator(
+                    config=physics_config,
+                    num_projections=self.num_projections
+                )
+                
+                ct_volume = simulator.simulate(
+                    voxel_grid,
+                    material=self.material,
+                    progress_callback=sim_progress
+                )
             
             timing_info['simulation_time'] = time.perf_counter() - sim_start
-            timing_info['total_time'] = time.perf_counter() - total_start
             
             # Get GPU-specific timing if available
             if hasattr(simulator, '_last_gpu_timing'):
                 timing_info['gpu_timing'] = simulator._last_gpu_timing
+            
+            # ===== PHASE 4: Compression Simulation =====
+            compression_results = []
+            if self.compression_config and self.compression_config.get('enabled'):
+                logging.info("=" * 50)
+                logging.info("PHASE 4: Compression + CT Simulation")
+                comp_start = time.perf_counter()
+                self.progress.emit(0.85)
+                
+                from simulation.mechanics import CompressionManager
+                from simulation.mechanics.manager import CompressionConfig, CompressionResult
+                
+                cfg = self.compression_config
+                manager = CompressionManager(use_gpu=cfg.get('use_gpu', True))
+                
+                comp_config = CompressionConfig(
+                    total_compression=cfg['total_compression'],
+                    num_steps=cfg['num_steps'],
+                    poisson_ratio=cfg['poisson_ratio'],
+                    axis=cfg.get('axis', 'Z'),
+                    use_physics=cfg['mode'] == 'physical',
+                    downsample_factor=cfg.get('downsample_factor', 4),
+                    solver_iterations=cfg.get('solver_iterations', 300),
+                    use_gpu=cfg.get('use_gpu', True),
+                    export_dicom=False
+                )
+                
+                # First, run compression on VOXEL GRID (binary data), not CT volume
+                voxel_data = voxel_grid.data.astype(np.float32)
+                
+                # Get deformed voxel grids for each step
+                deformed_grids = manager.run_simulation(
+                    voxel_data,
+                    voxel_grid.voxel_size,
+                    comp_config,
+                    progress_callback=lambda p, s: self.progress.emit(0.85 + p * 0.10)
+                )
+                
+                logging.info(f"  Generated {len(deformed_grids)} compressed voxel grids")
+                
+                # Now run CT simulation for each compressed voxel grid
+                from simulation.voxelizer import VoxelGrid
+                
+                for i, deform_result in enumerate(deformed_grids):
+                    step_progress = 0.95 + (i / len(deformed_grids)) * 0.05
+                    self.progress.emit(step_progress)
+                    logging.info(f"  CT simulation for step {i}/{len(deformed_grids)-1}...")
+                    
+                    # Create VoxelGrid from deformed data
+                    deformed_grid = VoxelGrid(
+                        data=deform_result.volume,
+                        voxel_size=deform_result.voxel_size,
+                        origin=voxel_grid.origin
+                    )
+                    
+                    # Run CT simulation on this deformed grid
+                    step_ct = simulator.simulate(
+                        deformed_grid,
+                        material=self.material,
+                        progress_callback=None  # Skip progress for sub-steps
+                    )
+                    
+                    # Store as CompressionResult with CT data
+                    compression_results.append(CompressionResult(
+                        step_index=deform_result.step_index,
+                        compression_ratio=deform_result.compression_ratio,
+                        _volume=step_ct.data,  # Use CT simulated data
+                        voxel_size=step_ct.voxel_size
+                    ))
+                
+                timing_info['compression_time'] = time.perf_counter() - comp_start
+                logging.info(f"  Compression + CT: {len(compression_results)} steps in {timing_info['compression_time']:.2f}s")
+            
+            timing_info['total_time'] = time.perf_counter() - total_start
             
             # ===== Summary =====
             logging.info("=" * 50)
@@ -246,13 +333,15 @@ class SimulationWorker(QThread):
             logging.info(f"  Voxelization:     {timing_info['voxelization_time']:.2f}s")
             logging.info(f"  Structure Gen:    {timing_info['structure_time']:.2f}s")
             logging.info(f"  CT Simulation:    {timing_info['simulation_time']:.2f}s")
+            if timing_info.get('compression_time'):
+                logging.info(f"  Compression:      {timing_info['compression_time']:.2f}s")
             logging.info(f"  TOTAL:            {timing_info['total_time']:.2f}s")
             if timing_info.get('gpu_timing'):
                 logging.info(f"  GPU Details: {timing_info['gpu_timing']}")
             logging.info("=" * 50)
             
             self.progress.emit(1.0)
-            self.finished.emit(ct_volume, timing_info)
+            self.finished.emit(ct_volume, timing_info, compression_results)
             
         except Exception as e:
             import traceback

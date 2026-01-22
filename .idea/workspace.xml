@@ -6,16 +6,13 @@
   <component name="ChangeListManager">
     <list default="true" id="da894b2b-fb82-4f2f-91f7-0dafbbfe7bd3" name="更改" comment="first commit">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/data_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/data_manager.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/main_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/panels/stl_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/stl_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/stl_panel.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/structure_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/structure_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/viewer_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/viewer_panel.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/workers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/loaders/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/loaders/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/loaders/stl_loader.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/simulation/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/backends/radon_kernels.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/backends/radon_kernels.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/physics/physical_simulator.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/physical_simulator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/structures/modifier.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/structures/modifier.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

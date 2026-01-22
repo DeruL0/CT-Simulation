@@ -119,12 +119,6 @@ class PhysicalCTSimulator:
         # Water attenuation for HU conversion
         self._mu_water_effective = self._calculate_effective_mu("water")
         
-        # GPU memory detection for dynamic batch sizing
-        self._gpu_total_mem = 0
-        self._gpu_free_mem = 0
-        if self.config.use_gpu and HAS_CUPY:
-            self._detect_gpu_memory()
-        
         logging.info(
             f"PhysicalCTSimulator initialized: {self.config.kvp} kVp, "
             f"{self.config.filtration_mm_al} mm Al, "
@@ -134,57 +128,6 @@ class PhysicalCTSimulator:
         # Initialize backend (defaults to CPU if not using GPU path)
         self._backend = get_backend(use_gpu=False)
     
-    def _detect_gpu_memory(self) -> None:
-        """Detect GPU memory and log available VRAM."""
-        try:
-            mempool = cp.get_default_memory_pool()
-            # Get device memory info
-            device = cp.cuda.Device()
-            self._gpu_total_mem = device.mem_info[1]  # Total memory in bytes
-            self._gpu_free_mem = device.mem_info[0]   # Free memory in bytes
-            
-            total_gb = self._gpu_total_mem / (1024**3)
-            free_gb = self._gpu_free_mem / (1024**3)
-            logging.info(f"  GPU Memory: {free_gb:.1f}/{total_gb:.1f} GB available")
-        except Exception as e:
-            logging.warning(f"Could not detect GPU memory: {e}")
-            self._gpu_total_mem = 8 * (1024**3)  # Default 8GB
-            self._gpu_free_mem = 6 * (1024**3)   # Conservative estimate
-    
-    def _calculate_batch_sizes(self, image_size: int) -> Tuple[int, int, int]:
-        """
-        Calculate optimal batch sizes based on available GPU memory and image size.
-        
-        Returns:
-            (slice_batch, radon_batch, iradon_batch)
-        """
-        # Memory estimation per operation (empirical)
-        # Radon: ~6 arrays of (batch_angles, n_det, n_det) float32 = batch * n_det^2 * 24 bytes
-        # iRadon: ~4 arrays of (batch_angles, output_size^2) float32 = batch * size^2 * 16 bytes
-        
-        n_det = int(np.ceil(np.sqrt(2) * image_size)) + 32  # Diagonal + padding
-        
-        # Use 60% of free memory as safety margin
-        available = self._gpu_free_mem * 0.6 if self._gpu_free_mem > 0 else 4 * (1024**3)
-        
-        # Calculate Radon batch size
-        # Each angle needs ~6 arrays of (n_det, n_det) floats
-        mem_per_radon_angle = n_det * n_det * 6 * 4  # bytes
-        radon_batch = max(5, min(60, int(available / (mem_per_radon_angle * 4))))
-        
-        # Calculate iRadon batch size  
-        # Each angle needs ~4 arrays of (output_size^2) floats
-        mem_per_iradon_angle = image_size * image_size * 4 * 4  # bytes
-        iradon_batch = max(10, min(120, int(available / (mem_per_iradon_angle * 2))))
-        
-        # Calculate slice batch size
-        # Each slice needs ~2x the slice data + intermediate buffers
-        mem_per_slice = image_size * image_size * 4 * 10  # Conservative estimate
-        slice_batch = max(1, min(16, int(available / (mem_per_slice * 8))))
-        
-        logging.info(f"  Auto batch sizes: slices={slice_batch}, radon={radon_batch}, iradon={iradon_batch}")
-        
-        return slice_batch, radon_batch, iradon_batch
     
     def _calculate_effective_mu(self, material: str) -> float:
         """
@@ -276,12 +219,22 @@ class PhysicalCTSimulator:
         output_size = max(h, w)
         
         if use_gpu:
-            # GPU path: batch process on GPU
+            # GPU path: delegate to GPUSimulator
             logging.info("Using GPU for physics simulation")
-            reconstructed = self._simulate_gpu(
-                voxel_grid.data, mu_object, mu_background,
-                bin_weights, bin_centers, progress_callback
+            from .gpu_simulator import GPUSimulator
+            
+            gpu_sim = GPUSimulator(self.theta)
+            reconstructed = gpu_sim.simulate_volume(
+                volume_data=voxel_grid.data,
+                mu_object=mu_object,
+                mu_background=mu_background,
+                bin_weights=bin_weights,
+                bin_centers=bin_centers,
+                photon_count=self.config.photon_count,
+                mu_water_effective=self._mu_water_effective,
+                progress_callback=progress_callback
             )
+
         else:
             # CPU path: parallel threads
             reconstructed = np.zeros((output_size, output_size, num_slices), dtype=np.float32)
@@ -436,229 +389,7 @@ class PhysicalCTSimulator:
         
         return hu_slice.astype(np.float32), output_size
     
-    def _simulate_gpu(
-        self,
-        volume_data: np.ndarray,
-        mu_object: np.ndarray,
-        mu_background: np.ndarray,
-        bin_weights: np.ndarray,
-        bin_centers: np.ndarray,
-        progress_callback: Optional[Callable[[float], None]] = None
-    ) -> np.ndarray:
-        """
-        GPU-accelerated simulation for all slices with batch processing.
-        
-        Uses CuPy for vectorized Radon/iRadon transforms.
-        Processes slices in batches to reduce kernel launch overhead.
-        Output is always square (based on max of H, W).
-        """
-        num_slices = volume_data.shape[2]
-        h, w = volume_data.shape[:2]
-        
-        # Output will be square based on longer edge
-        output_size = max(h, w)
-        
-        # Calculate dynamic batch sizes based on GPU memory
-        slice_batch, radon_batch, iradon_batch = self._calculate_batch_sizes(output_size)
-        
-        # Initialize GPU Radon transform with calculated batch sizes
-        self._radon_transform = GPURadonTransform(radon_batch=radon_batch, iradon_batch=iradon_batch)
-        
-        # Pre-compute on GPU (cached for all slices)
-        mu_obj_gpu = cp.asarray(mu_object, dtype=cp.float32)
-        mu_bg_gpu = cp.asarray(mu_background, dtype=cp.float32)
-        weights_gpu = cp.asarray(bin_weights, dtype=cp.float32)
-        theta_gpu = cp.asarray(self.theta, dtype=cp.float32)
-        photon_count = self.config.photon_count
-        
-        # Pre-compute geometry arrays (OPTIMIZATION: only once per simulation)
-        theta_rad = theta_gpu * (cp.pi / 180.0)
-        cos_theta = cp.cos(theta_rad)
-        sin_theta = cp.sin(theta_rad)
-        
-        # Cache geometry in instance for batch processing
-        self._cached_cos_theta = cos_theta
-        self._cached_sin_theta = sin_theta
-        
-        # Output array (square slices)
-        reconstructed = np.zeros((output_size, output_size, num_slices), dtype=np.float32)
-        
-        # Dynamic batch processing based on detected GPU memory
-        BATCH_SIZE = slice_batch
-        
-        logging.info(f"  GPU batch processing {num_slices} slices (batch_size={BATCH_SIZE})")
-        
-        # Create streams for overlapped transfer
-        compute_stream = cp.cuda.Stream(non_blocking=True)
-        transfer_stream = cp.cuda.Stream(non_blocking=True)
-        
-        completed = 0
-        prev_batch_stack = None
-        prev_batch_start = 0
-        prev_batch_end = 0
-        
-        for batch_start in range(0, num_slices, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, num_slices)
-            batch_slices = batch_end - batch_start
-            
-            # Transfer batch to GPU (can overlap with previous D2H)
-            with transfer_stream:
-                batch_data = cp.asarray(volume_data[:, :, batch_start:batch_end], dtype=cp.float32)
-            
-            # Wait for transfer to complete before compute
-            compute_stream.wait_event(transfer_stream.record())
-            
-            # Process batch on compute stream
-            with compute_stream:
-                batch_results = []
-                for i in range(batch_slices):
-                    slice_2d = batch_data[:, :, i]
-                    recon_gpu, _ = self._simulate_slice_gpu(
-                        slice_2d, mu_obj_gpu, mu_bg_gpu,
-                        weights_gpu, theta_gpu, photon_count
-                    )
-                    batch_results.append(recon_gpu)
-                
-                batch_stack = cp.stack(batch_results, axis=2)
-            
-            # Transfer previous batch back to CPU while current batch computes
-            if prev_batch_stack is not None:
-                with transfer_stream:
-                    # Wait for previous compute to finish
-                    transfer_stream.wait_event(compute_stream.record())
-                    reconstructed[:, :, prev_batch_start:prev_batch_end] = cp.asnumpy(prev_batch_stack)
-                    del prev_batch_stack
-            
-            prev_batch_stack = batch_stack
-            prev_batch_start = batch_start
-            prev_batch_end = batch_end
-            
-            # Clean up current batch input
-            del batch_data, batch_results
-            
-            completed += batch_slices
-            if progress_callback:
-                progress_callback(completed / num_slices)
-        
-        # Transfer final batch
-        if prev_batch_stack is not None:
-            compute_stream.synchronize()
-            reconstructed[:, :, prev_batch_start:prev_batch_end] = cp.asnumpy(prev_batch_stack)
-            del prev_batch_stack
-        
-        # Final memory cleanup
-        cp.get_default_memory_pool().free_all_blocks()
-        
-        return reconstructed
     
-    def _simulate_slice_gpu(
-        self,
-        slice_gpu: "cp.ndarray",
-        mu_object: "cp.ndarray",
-        mu_background: "cp.ndarray",
-        bin_weights: "cp.ndarray",
-        theta_gpu: "cp.ndarray",
-        photon_count: float
-    ) -> "cp.ndarray":
-        """
-        Simulate CT for a single slice on GPU with polychromatic physics.
-        
-        Output is always a square based on the longer edge for consistent CT geometry.
-        """
-        original_shape = slice_gpu.shape
-        
-        # Output will be a square based on the longer edge
-        output_size = max(original_shape[0], original_shape[1])
-        
-        # Pad to diagonal size for proper radon/iradon transform
-        # Add safety margin to prevent edge artifacts
-        diag_len = int(cp.ceil(cp.sqrt(output_size**2 + output_size**2))) + 32
-        
-        # First pad to square (output_size x output_size)
-        pad_to_square_h = output_size - original_shape[0]
-        pad_to_square_w = output_size - original_shape[1]
-        sq_pad_top = pad_to_square_h // 2
-        sq_pad_left = pad_to_square_w // 2
-        
-        if pad_to_square_h > 0 or pad_to_square_w > 0:
-            square_slice = cp.pad(
-                slice_gpu,
-                ((sq_pad_top, pad_to_square_h - sq_pad_top), 
-                 (sq_pad_left, pad_to_square_w - sq_pad_left)),
-                mode='constant',
-                constant_values=0.0
-            )
-        else:
-            square_slice = slice_gpu
-        
-        # Then pad to diagonal for radon transform
-        diag_pad = diag_len - output_size
-        diag_pad_half = diag_pad // 2
-        
-        if diag_pad > 0:
-            padded_slice = cp.pad(
-                square_slice,
-                ((diag_pad_half, diag_pad - diag_pad_half), 
-                 (diag_pad_half, diag_pad - diag_pad_half)),
-                mode='constant',
-                constant_values=0.0
-            )
-        else:
-            padded_slice = square_slice
-            diag_pad_half = 0
-        
-        # Forward projection (Radon) - using extracted kernel
-        path_lengths = self._radon_transform.radon(padded_slice, theta_gpu)
-        
-        max_path = float(path_lengths.max()) * 1.1 if path_lengths.max() > 0 else 100.0
-        
-        # Polychromatic Beer-Lambert (vectorized over energy bins)
-        I_transmitted = cp.zeros_like(path_lengths)
-        n_bins = len(bin_weights)
-        
-        for i in range(n_bins):
-            weight = bin_weights[i]
-            if weight <= 0:
-                continue
-            
-            mu_obj = mu_object[i]
-            mu_bg = mu_background[i]
-            
-            L_object = path_lengths
-            L_bg = cp.maximum(max_path - L_object, 0)
-            
-            attenuation = cp.exp(-mu_obj * L_object - mu_bg * L_bg)
-            I_transmitted += weight * attenuation
-        
-        # Poisson noise
-        I_counts = I_transmitted * photon_count
-        I_counts = cp.maximum(I_counts, 1.0)
-        
-        # CuPy Poisson requires integer lambda
-        I_noisy = cp.random.poisson(I_counts.astype(cp.int64)).astype(cp.float32)
-        I_noisy = cp.maximum(I_noisy, 1.0)
-        
-        # Log transform
-        I_ratio = I_noisy / photon_count
-        sinogram = -cp.log(cp.maximum(I_ratio, 1e-10))
-        
-        # Inverse Radon (FBP) using extracted kernel
-        reconstructed = self._radon_transform.iradon(sinogram, theta_gpu, diag_len)
-        
-        # Crop back to output_size x output_size (square)
-        if diag_pad > 0:
-            reconstructed = reconstructed[
-                diag_pad_half:diag_pad_half + output_size,
-                diag_pad_half:diag_pad_half + output_size
-            ]
-        
-        # Convert to HU
-        hu_slice = 1000 * (reconstructed - self._mu_water_effective) / self._mu_water_effective
-        
-        return hu_slice.astype(cp.float32), output_size
-    
-    # NOTE: _radon_gpu and _iradon_gpu methods have been extracted to
-    # simulation/backends/radon_kernels.py (GPURadonTransform class)
     
     @property
     def spectrum(self) -> XRaySpectrum:

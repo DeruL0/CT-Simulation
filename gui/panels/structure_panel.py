@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QThread
 import logging
 import numpy as np
-import threading
 
 from simulation.voxelizer import Voxelizer, VoxelGrid
 from simulation.structures import StructureModifier
@@ -53,7 +52,7 @@ class StructurePanel(QWidget):
         # Main container group
         self._struct_group = QGroupBox("Structure Generation")
         self._struct_group.setCheckable(True)
-        self._struct_group.setChecked(False) # Off by default
+        self._struct_group.setChecked(False)  # Off by default
         struct_layout = QVBoxLayout(self._struct_group)
         struct_layout.setSpacing(10)
         
@@ -67,8 +66,8 @@ class StructurePanel(QWidget):
         # Navigation Buttons
         nav_layout = QHBoxLayout()
         self._btn_lattice = QPushButton("Lattice")
-        self._btn_defects = QPushButton("Random Defects")
-        self._btn_manual = QPushButton("Manual Modifiers")
+        self._btn_defects = QPushButton("Defects")
+        self._btn_manual = QPushButton("Manual")
         
         self._btn_lattice.setCheckable(True)
         self._btn_defects.setCheckable(True)
@@ -146,12 +145,11 @@ class StructurePanel(QWidget):
         self._struct_group.toggled.connect(self._on_group_toggled)
 
     def _on_group_toggled(self, checked):
-        # Provide visual feedback or enable/disable logic if needed
         pass
 
     def _on_stl_loaded(self):
         self._set_controls_enabled(True)
-        self._modifier = None # Reset modifier on new STL
+        self._modifier = None  # Reset modifier on new STL
 
     def _set_controls_enabled(self, enabled: bool):
         self._struct_group.setEnabled(enabled)
@@ -185,6 +183,11 @@ class StructurePanel(QWidget):
             return ("generate_random_voids", self._defects_page.get_config())
             
         return None  # Manual mode not handled via auto-generation pipeline
+
+    def reset_structure(self):
+        """Reset structure modifier and voxel grid state."""
+        self._modifier = None
+        logging.info("Structure panel reset")
 
     # =========================================================================
     # Manual Modification Handlers

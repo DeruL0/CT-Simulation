@@ -17,6 +17,7 @@ from .physics import (
     SpectrumGenerator,
     XRaySpectrum,
 )
+from .simple_simulator import SimpleCTSimulator
 
 # Re-export from loaders for backwards compatibility
 from loaders import MeshLoader as STLLoader, MeshInfo
@@ -30,9 +31,11 @@ __all__ = [
     "MaterialType",
     "Material", 
     "CTVolume",
-    # Physics
+    # Simulators
+    "SimpleCTSimulator",
     "PhysicalCTSimulator",
     "PhysicsConfig",
     "SpectrumGenerator",
     "XRaySpectrum",
 ]
+

@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction
 
 from .style import ScientificStyle
-from .panels import STLPanel, ParamsPanel, ViewerPanel
+from .panels import LoaderPanel, ParamsPanel, ViewerPanel, CompressionPanel
 from .panels.structure_panel import StructurePanel
 from .workers import SimulationWorker, ExportWorker
 
@@ -69,9 +69,9 @@ class MainWindow(QMainWindow):
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(4, 4, 4, 4)  # Add small margin inside scroll area
         
-        # STL Panel
-        self._stl_panel = STLPanel()
-        controls_layout.addWidget(self._stl_panel)
+        # Loader Panel
+        self._loader_panel = LoaderPanel()
+        controls_layout.addWidget(self._loader_panel)
         
         # Parameters Panel
         self._params_panel = ParamsPanel()
@@ -80,6 +80,10 @@ class MainWindow(QMainWindow):
         # Structure Panel (Industrial/Manual Modifiers)
         self._structure_panel = StructurePanel(self._data_manager)
         controls_layout.addWidget(self._structure_panel)
+        
+        # Compression Panel (Physical compression simulation)
+        self._compression_panel = CompressionPanel(self._data_manager)
+        controls_layout.addWidget(self._compression_panel)
         
         # Action buttons
         actions_group = QGroupBox("Actions")
@@ -111,8 +115,8 @@ class MainWindow(QMainWindow):
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setMinimumWidth(320)  # Slightly wider for structure controls
-        scroll_area.setMaximumWidth(450)
+        scroll_area.setMinimumWidth(380)  # Wider for structure controls
+        scroll_area.setMaximumWidth(550)
         
         splitter.addWidget(scroll_area)
         
@@ -135,7 +139,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         
         # Set initial splitter sizes
-        splitter.setSizes([300, 900])
+        splitter.setSizes([420, 980])
         
         main_layout.addWidget(splitter)
         
@@ -191,8 +195,11 @@ class MainWindow(QMainWindow):
     
     def _connect_signals(self) -> None:
         """Connect widget signals."""
-        self._stl_panel.stl_loaded.connect(self._on_stl_loaded)
+        self._loader_panel.stl_loaded.connect(self._on_stl_loaded)
         self._params_panel.params_changed.connect(self._on_params_changed)
+        
+        # Compression panel signals
+        self._compression_panel.step_changed.connect(self._on_compression_step_changed)
     
     # ========== Helper Methods ==========
     
@@ -241,7 +248,7 @@ class MainWindow(QMainWindow):
         )
         
         if file_path:
-            self._stl_panel.load_stl(file_path)
+            self._loader_panel.load_stl(file_path)
     
     def _on_stl_loaded(self, loader: STLLoader) -> None:
         """Handle STL file loaded."""
@@ -301,7 +308,7 @@ class MainWindow(QMainWindow):
             num_projections=self._params_panel.num_projections,
             add_noise=self._params_panel.add_noise,
             noise_level=self._params_panel.noise_level,
-            material=self._stl_panel.selected_material,
+            material=self._loader_panel.selected_material,
             fast_mode=self._params_panel.fast_mode,
             memory_limit_gb=self._params_panel.memory_limit_gb,
             use_gpu=self._params_panel.use_gpu,
@@ -311,7 +318,8 @@ class MainWindow(QMainWindow):
             physics_filtration=self._params_panel.physics_filtration,
             physics_energy_bins=self._params_panel.physics_energy_bins,
             voxel_grid=self._data_manager.voxel_grid,  # Use pre-computed if available
-            structure_config=self._structure_panel.get_active_config() # Pass active structure config
+            structure_config=self._structure_panel.get_active_config(), # Pass active structure config
+            compression_config=self._compression_panel.get_config() if self._compression_panel.is_enabled() else None
         )
         
         self._worker.progress.connect(self._on_sim_progress)
@@ -325,8 +333,8 @@ class MainWindow(QMainWindow):
         if self._progress_dialog:
             self._progress_dialog.setValue(int(progress * 100))
     
-    @Slot(object, dict)
-    def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict) -> None:
+    @Slot(object, dict, list)
+    def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list) -> None:
         """Handle simulation completed."""
         self._ct_volume = ct_volume
         
@@ -335,21 +343,43 @@ class MainWindow(QMainWindow):
         self._simulate_btn.setEnabled(True)
         self._export_btn.setEnabled(True)
         
-        # Display in viewers
-        self._viewer_panel.set_volume(ct_volume.data)
-        
-        # Update 3D view with CT isosurface
-        threshold = 0.0  # Use water level as default threshold
-        self._viewer_3d_panel.set_ct_volume(
-            ct_volume.data, 
-            ct_volume.voxel_size, 
-            threshold=threshold
-        )
-        
-        self._status_bar.showMessage(
-            f"Simulation complete: {ct_volume.num_slices} slices, "
-            f"{ct_volume.voxel_size:.2f} mm/voxel"
-        )
+        # Handle compression results if present
+        if compression_results and len(compression_results) > 1:
+            # Set up time-series for both viewers
+            volumes = [r.volume for r in compression_results]
+            self._viewer_panel.set_volume_series(volumes)
+            
+            # Set results in compression panel for slider
+            self._compression_panel.set_results(compression_results)
+            
+            # Display final step in 3D
+            final_result = compression_results[-1]
+            self._viewer_3d_panel.set_ct_volume(
+                final_result.volume,
+                final_result.voxel_size,
+                threshold=0.0
+            )
+            
+            self._status_bar.showMessage(
+                f"Simulation complete with {len(compression_results)} compression steps"
+            )
+        else:
+            # No compression - display single volume
+            self._viewer_panel.set_volume(ct_volume.data)
+            self._compression_panel.clear_results()
+            
+            # Update 3D view with CT isosurface
+            threshold = 0.0  # Use water level as default threshold
+            self._viewer_3d_panel.set_ct_volume(
+                ct_volume.data, 
+                ct_volume.voxel_size, 
+                threshold=threshold
+            )
+            
+            self._status_bar.showMessage(
+                f"Simulation complete: {ct_volume.num_slices} slices, "
+                f"{ct_volume.voxel_size:.2f} mm/voxel"
+            )
         
         # Build detailed timing message
         if timing_info.get('physics_mode'):
@@ -368,8 +398,18 @@ class MainWindow(QMainWindow):
             f"--- Timing ({mode_str}) ---\n"
             f"Voxelization: {timing_info['voxelization_time']:.2f}s\n"
             f"Simulation: {timing_info['simulation_time']:.2f}s\n"
-            f"Total: {timing_info['total_time']:.2f}s\n"
         )
+        
+        if timing_info.get('compression_time'):
+            timing_msg += f"Compression: {timing_info['compression_time']:.2f}s\n"
+        
+        timing_msg += f"Total: {timing_info['total_time']:.2f}s\n"
+        
+        # Add compression info
+        if compression_results and len(compression_results) > 1:
+            timing_msg += f"\n--- Compression ---\n"
+            timing_msg += f"Steps: {len(compression_results)}\n"
+            timing_msg += f"Use slider in Compression Panel to view steps.\n"
         
         # Add GPU-specific timing breakdown if available
         if timing_info.get('gpu_timing'):
@@ -501,3 +541,25 @@ class MainWindow(QMainWindow):
             "<li>DICOM export with proper metadata</li>"
             "</ul>"
         )
+    
+    def _on_compression_step_changed(self, step_index: int, volume_data) -> None:
+        """Handle compression step slider change - update 3D and 2D viewers."""
+        if volume_data is None:
+            return
+        
+        # Update 3D viewer with the selected step's volume
+        voxel_size = self._data_manager.voxel_grid.voxel_size if self._data_manager.has_voxel_grid else 0.5
+        threshold = 0.5
+        
+        self._viewer_3d_panel.set_ct_volume(
+            volume_data,
+            voxel_size,
+            threshold=threshold
+        )
+        
+        # Update 2D viewer with the selected step
+        self._viewer_panel.set_current_step(step_index)
+        
+        self._status_bar.showMessage(f"Viewing compression step {step_index}")
+
+

@@ -20,11 +20,11 @@ from loaders import MeshLoader, MeshInfo, SUPPORTED_EXTENSIONS
 from simulation.materials import MaterialType
 
 
-class STLPanel(QWidget):
+class LoaderPanel(QWidget):
     """Panel for 3D mesh file import and material selection."""
     
     # Signal emitted when a new mesh file is loaded
-    stl_loaded = Signal(object)  # Emits the MeshLoader object (signal name kept for compatibility)
+    stl_loaded = Signal(object)  # Emits the MeshLoader object (keep signal name for compatibility)
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -47,7 +47,25 @@ class STLPanel(QWidget):
         self._file_label.setObjectName("secondaryLabel")
         self._file_label.setWordWrap(True)
         
-        self._import_btn = QPushButton("Browse...")
+        self._import_btn = QPushButton("📂 Import 3D Mesh File...")
+        self._import_btn.setMinimumHeight(32)
+        # White background, black text, bold
+        self._import_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                color: black;
+                font-weight: bold;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #f0f0f0;
+                border: 1px solid #999;
+            }
+            QPushButton:pressed {
+                background-color: #e0e0e0;
+            }
+        """)
         self._import_btn.clicked.connect(self._on_browse_clicked)
         
         file_layout.addWidget(self._file_label, stretch=1)
@@ -55,6 +73,9 @@ class STLPanel(QWidget):
         import_layout.addLayout(file_layout)
         
         layout.addWidget(import_group)
+        
+        # Ensure panel doesn't get crushed
+        self.setMinimumHeight(200)
         
         # Mesh info section
         info_group = QGroupBox("Mesh Information")

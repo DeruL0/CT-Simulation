@@ -4,7 +4,7 @@ Viewer Panel
 Provides 2D slice viewer for CT volumes with window/level controls.
 """
 
-from typing import Optional
+from typing import Optional, List
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -41,6 +41,8 @@ class ViewerPanel(QWidget):
         super().__init__(parent)
         
         self._volume: Optional[np.ndarray] = None
+        self._volumes: List[np.ndarray] = []  # Time-series volumes
+        self._current_step: int = 0
         self._current_slice = 0
         
         self._setup_ui()
@@ -259,3 +261,55 @@ class ViewerPanel(QWidget):
     def window_width(self) -> int:
         """Get current window width."""
         return self._ww_slider.value()
+    
+    def set_volume_series(self, volumes: List[np.ndarray]) -> None:
+        """
+        Set a time-series of volumes for step-based viewing.
+        
+        Args:
+            volumes: List of 3D volumes for each time step
+        """
+        self._volumes = volumes
+        self._current_step = 0
+        
+        if volumes:
+            self.set_volume(volumes[0])
+    
+    def set_current_step(self, step: int) -> None:
+        """
+        Switch 2D view to specified time step.
+        
+        Args:
+            step: Time step index
+        """
+        if not self._volumes or step < 0 or step >= len(self._volumes):
+            return
+        
+        self._current_step = step
+        
+        # Preserve current slice position
+        current_slice = self._current_slice
+        
+        # Set new volume but try to keep same slice
+        volume = self._volumes[step]
+        self._volume = volume
+        
+        # Adjust slice if out of range
+        max_slice = volume.shape[0] - 1
+        if current_slice > max_slice:
+            current_slice = max_slice
+        
+        # Update display without resetting slice position
+        self._slice_slider.setRange(0, volume.shape[0] - 1)
+        self._slice_spin.setRange(0, volume.shape[0] - 1)
+        self._total_slices_label.setText(f"/ {volume.shape[0]}")
+        
+        self._current_slice = current_slice
+        self._slice_slider.setValue(current_slice)
+        self._update_display()
+    
+    def clear_volume_series(self) -> None:
+        """Clear time-series volumes."""
+        self._volumes = []
+        self._current_step = 0
+
