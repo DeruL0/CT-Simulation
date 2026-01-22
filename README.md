@@ -20,6 +20,11 @@ A high-performance scientific application for simulating Computed Tomography (CT
     - **GPU**: High-performance CUDA implementation using `CuPy` (up to 50x faster) + Dynamic Batching.
     - **CPU**: Reliable fallback using `scikit-image`.
   - Configurable physics: kVp range, filtration, photon noise.
+- **Compression Simulation**:
+  - **Physics-Based**: Linear elasticity simulation using Finite Element Method (FEM).
+  - **GPU Acceleration**: Fast conjugate gradient solver on GPU.
+  - **Time-Series**: 4D visualization of compression steps with adjustable slider.
+  - **Workflow Integration**: Seamlessly chain Voxelization -> Structure -> Compression -> CT Simulation.
 - **Visualization**:
   - **3D Mesh Viewer**: Inspect input STL models with realistic lighting.
   - **2D Slice Viewer**: Interactive axial, coronal, and sagittal views.
@@ -28,7 +33,7 @@ A high-performance scientific application for simulating Computed Tomography (CT
 
 ## Project Structure
 
-```
+```text
 Simulation/
 ├── core/               # Data management and abstract base classes
 ├── exporters/          # Data export (DICOM)
@@ -39,9 +44,10 @@ Simulation/
 ├── loaders/            # File loaders (STL)
 ├── simulation/         # Core algorithms
 │   ├── backends/       # GPU (CuPy) and CPU (skimage) backends
+│   ├── mechanics/      # NEW: Compression and Elasticity Solver
 │   ├── physics/        # X-ray physics (Spectrum, Attenuation)
 │   ├── structures/     # Lattice and Defect generation
-│   ├── ct_simulator.py # Main facade
+│   ├── simple_simulator.py # Fast preview simulator
 │   └── voxelizer.py    # Voxelization logic
 └── visualization/      # Rendering components (2D/3D viewers)
 ```
@@ -75,13 +81,16 @@ python main.py
 2. **Structure (Optional)**:
    - Go to "Structure Generation" to apply internal patterns (Lattices) or Defects.
    - Click "Generate" (applied automatically during simulation pipeline).
-3. **Configure Simulation**:
+3. **Compression (Optional)**:
+   - Configure compression axis (X/Y/Z), ratio, and number of time steps.
+   - Enables 4D time-series visualization.
+4. **Configure Simulation**:
    - Set Material (human tissues or industrial materials).
    - Configure Scanner Physics (kVp, Filtration).
-4. **Simulate**: Click "Run Simulation".
+5. **Simulate**: Click "Run Simulation".
    - The app automatically detects GPU availability.
    - Real-time progress is shown for Voxelization -> Modification -> Forward Projection -> Reconstruction.
-5. **Visualize & Export**: Inspect slices and export to DICOM.
+6. **Visualize & Export**: Inspect slices and export to DICOM.
 
 ## Performance
 
