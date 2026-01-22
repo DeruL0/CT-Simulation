@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 import math
 
+from ..utils import create_spinbox, update_stack_sizing
+
 
 class ParamsPanel(QWidget):
     """Panel for CT simulation parameters."""
@@ -59,13 +61,10 @@ class ParamsPanel(QWidget):
         page_manual = QWidget()
         layout_manual = QFormLayout(page_manual)
         layout_manual.setContentsMargins(0, 0, 0, 0)
-        self._voxel_size_spin = QDoubleSpinBox()
-        self._voxel_size_spin.setRange(0.001, 100.0)
-        self._voxel_size_spin.setValue(0.5)
-        self._voxel_size_spin.setSingleStep(0.01)
-        self._voxel_size_spin.setDecimals(4)
-        self._voxel_size_spin.setSuffix(" mm")
-        self._voxel_size_spin.valueChanged.connect(self._on_param_changed)
+        self._voxel_size_spin = create_spinbox(
+            0.5, 0.001, 100.0, step=0.01, decimals=4, suffix=" mm",
+            callback=self._on_param_changed
+        )
         layout_manual.addRow("Voxel Size:", self._voxel_size_spin)
         self._input_stack.addWidget(page_manual)
         
@@ -73,10 +72,9 @@ class ParamsPanel(QWidget):
         page_octree = QWidget()
         layout_octree = QFormLayout(page_octree)
         layout_octree.setContentsMargins(0, 0, 0, 0)
-        self._octree_depth_spin = QSpinBox()
-        self._octree_depth_spin.setRange(4, 14)  # 2^4=16 to 2^14=16384
-        self._octree_depth_spin.setValue(8)      # 2^8=256
-        self._octree_depth_spin.valueChanged.connect(self._on_octree_depth_changed)
+        self._octree_depth_spin = create_spinbox(
+            8, 4, 14, callback=self._on_octree_depth_changed
+        )
         layout_octree.addRow("Octree Depth:", self._octree_depth_spin)
         self._octree_info_label = QLabel("Grid: -")
         self._octree_info_label.setObjectName("secondaryLabel")
@@ -87,12 +85,10 @@ class ParamsPanel(QWidget):
         page_res = QWidget()
         layout_res = QFormLayout(page_res)
         layout_res.setContentsMargins(0, 0, 0, 0)
-        self._target_res_spin = QSpinBox()
-        self._target_res_spin.setRange(32, 4096)
-        self._target_res_spin.setValue(512)
-        self._target_res_spin.setSingleStep(32)
-        self._target_res_spin.setSuffix(" px")
-        self._target_res_spin.valueChanged.connect(self._on_target_res_changed)
+        self._target_res_spin = create_spinbox(
+            512, 32, 4096, step=32, suffix=" px",
+            callback=self._on_target_res_changed
+        )
         layout_res.addRow("Max Resolution:", self._target_res_spin)
         self._input_stack.addWidget(page_res)
         
@@ -100,11 +96,10 @@ class ParamsPanel(QWidget):
         page_slices = QWidget()
         layout_slices = QFormLayout(page_slices)
         layout_slices.setContentsMargins(0, 0, 0, 0)
-        self._target_slices_spin = QSpinBox()
-        self._target_slices_spin.setRange(32, 4096)
-        self._target_slices_spin.setValue(256)
-        self._target_slices_spin.setSingleStep(16)
-        self._target_slices_spin.valueChanged.connect(self._on_target_slices_changed)
+        self._target_slices_spin = create_spinbox(
+            256, 32, 4096, step=16,
+            callback=self._on_target_slices_changed
+        )
         layout_slices.addRow("Num Slices:", self._target_slices_spin)
         self._input_stack.addWidget(page_slices)
         
@@ -112,19 +107,16 @@ class ParamsPanel(QWidget):
         page_combined = QWidget()
         layout_combined = QFormLayout(page_combined)
         layout_combined.setContentsMargins(0, 0, 0, 0)
-        self._combined_res_spin = QSpinBox()
-        self._combined_res_spin.setRange(32, 4096)
-        self._combined_res_spin.setValue(512)
-        self._combined_res_spin.setSingleStep(32)
-        self._combined_res_spin.setSuffix(" px")
-        self._combined_res_spin.valueChanged.connect(self._on_combined_changed)
+        self._combined_res_spin = create_spinbox(
+            512, 32, 4096, step=32, suffix=" px",
+            callback=self._on_combined_changed
+        )
         layout_combined.addRow("Max Resolution (X/Y):", self._combined_res_spin)
         
-        self._combined_slices_spin = QSpinBox()
-        self._combined_slices_spin.setRange(32, 4096)
-        self._combined_slices_spin.setValue(256)
-        self._combined_slices_spin.setSingleStep(16)
-        self._combined_slices_spin.valueChanged.connect(self._on_combined_changed)
+        self._combined_slices_spin = create_spinbox(
+            256, 32, 4096, step=16,
+            callback=self._on_combined_changed
+        )
         layout_combined.addRow("Num Slices (Z):", self._combined_slices_spin)
         
         self._combined_info_label = QLabel("Voxel Size: -")
@@ -154,34 +146,29 @@ class ParamsPanel(QWidget):
         
         # Number of projections
         proj_row = QHBoxLayout()
-        self._projections_spin = QSpinBox()
-        self._projections_spin.setRange(90, 720)
-        self._projections_spin.setValue(360)
-        self._projections_spin.setSingleStep(30)
-        self._projections_spin.valueChanged.connect(self._on_param_changed)
+        self._projections_spin = create_spinbox(
+            360, 90, 720, step=30,
+            callback=self._on_param_changed
+        )
         proj_row.addWidget(self._projections_spin)
         ct_layout.addRow("Projections:", proj_row)
         
         # Tube voltage (kVp)
         kvp_row = QHBoxLayout()
-        self._kvp_spin = QSpinBox()
-        self._kvp_spin.setRange(40, 300)
-        self._kvp_spin.setValue(120)
-        self._kvp_spin.setSingleStep(10)
-        self._kvp_spin.setSuffix(" kVp")
-        self._kvp_spin.valueChanged.connect(self._on_param_changed)
+        self._kvp_spin = create_spinbox(
+            120, 20, 500, step=10, suffix=" kVp",
+            callback=self._on_param_changed
+        )
         kvp_row.addWidget(self._kvp_spin)
         ct_layout.addRow("Tube Voltage:", kvp_row)
         
         # Tube current (mA)
         ma_row = QHBoxLayout()
-        self._ma_spin = QSpinBox()
-        self._ma_spin.setRange(10, 1000)
-        self._ma_spin.setValue(200)
-        self._ma_spin.setSingleStep(50)
-        self._ma_spin.setSuffix(" mA")
-        self._ma_spin.setToolTip("Higher current = more photons = less noise")
-        self._ma_spin.valueChanged.connect(self._on_param_changed)
+        self._ma_spin = create_spinbox(
+            200, 1, 2000, step=50, suffix=" mA",
+            tooltip="Higher current = more photons = less noise",
+            callback=self._on_param_changed
+        )
         ma_row.addWidget(self._ma_spin)
         ct_layout.addRow("Tube Current:", ma_row)
         
@@ -231,13 +218,10 @@ class ParamsPanel(QWidget):
         # Memory limit setting
         mem_row = QHBoxLayout()
         mem_row.addWidget(QLabel("Memory Limit:"))
-        self._memory_limit_spin = QDoubleSpinBox()
-        self._memory_limit_spin.setRange(0.5, 16.0)
-        self._memory_limit_spin.setValue(2.0)
-        self._memory_limit_spin.setSingleStep(0.5)
-        self._memory_limit_spin.setDecimals(1)
-        self._memory_limit_spin.setSuffix(" GB")
-        self._memory_limit_spin.valueChanged.connect(self._on_param_changed)
+        self._memory_limit_spin = create_spinbox(
+            2.0, 0.5, 16.0, step=0.5, decimals=1, suffix=" GB",
+            callback=self._on_param_changed
+        )
         mem_row.addWidget(self._memory_limit_spin)
         speed_layout.addLayout(mem_row)
         
@@ -278,21 +262,17 @@ class ParamsPanel(QWidget):
         physics_params_layout.addRow("Tube Voltage:", self._kvp_physics_combo)
         
         # Filtration
-        self._filtration_spin = QDoubleSpinBox()
-        self._filtration_spin.setRange(0.5, 10.0)
-        self._filtration_spin.setValue(2.5)
-        self._filtration_spin.setSingleStep(0.5)
-        self._filtration_spin.setDecimals(1)
-        self._filtration_spin.setSuffix(" mm Al")
-        self._filtration_spin.valueChanged.connect(self._on_param_changed)
+        self._filtration_spin = create_spinbox(
+            2.5, 0.5, 10.0, step=0.5, decimals=1, suffix=" mm Al",
+            callback=self._on_param_changed
+        )
         physics_params_layout.addRow("Filtration:", self._filtration_spin)
         
         # Energy bins
-        self._energy_bins_spin = QSpinBox()
-        self._energy_bins_spin.setRange(5, 50)
-        self._energy_bins_spin.setValue(10)
-        self._energy_bins_spin.setToolTip("More bins = more accurate, slower")
-        self._energy_bins_spin.valueChanged.connect(self._on_param_changed)
+        self._energy_bins_spin = create_spinbox(
+            10, 5, 50, tooltip="More bins = more accurate, slower",
+            callback=self._on_param_changed
+        )
         physics_params_layout.addRow("Energy Bins:", self._energy_bins_spin)
         
         self._physics_params_widget.setVisible(False)
@@ -305,15 +285,7 @@ class ParamsPanel(QWidget):
 
     def _update_stack_sizing(self, index):
         """Update stack widget size policy to fit current page."""
-        for i in range(self._input_stack.count()):
-            widget = self._input_stack.widget(i)
-            if i == index:
-                widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-                widget.updateGeometry()
-            else:
-                widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        # Trigger layout update
-        self._input_stack.adjustSize()
+        update_stack_sizing(self._input_stack, index)
     
     def _on_param_changed(self) -> None:
         """Handle parameter change."""

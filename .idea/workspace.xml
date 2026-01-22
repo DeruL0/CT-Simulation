@@ -5,7 +5,17 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="da894b2b-fb82-4f2f-91f7-0dafbbfe7bd3" name="更改" comment="first commit">
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/exporters/dicom.py" beforeDir="false" afterPath="$PROJECT_DIR$/exporters/dicom.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/main_window.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/compression_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/compression_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/loader_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/loader_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/pages/defects_page.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/pages/defects_page.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/pages/lattice_page.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/pages/lattice_page.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/pages/manual_page.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/pages/manual_page.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/params_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/params_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/panels/structure_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/structure_panel.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/workers.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -38,6 +48,7 @@
   <component name="PropertiesComponent">{
   &quot;keyToString&quot;: {
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.loader_panel.executor&quot;: &quot;Run&quot;,
     &quot;Python.main.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,

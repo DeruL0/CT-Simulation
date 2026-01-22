@@ -18,6 +18,7 @@ from PySide6.QtCore import Signal
 
 from loaders import MeshLoader, MeshInfo, SUPPORTED_EXTENSIONS
 from simulation.materials import MaterialType
+from ..utils import create_spinbox
 
 
 class LoaderPanel(QWidget):
@@ -25,6 +26,8 @@ class LoaderPanel(QWidget):
     
     # Signal emitted when a new mesh file is loaded
     stl_loaded = Signal(object)  # Emits the MeshLoader object (keep signal name for compatibility)
+    # Signal emitted when mesh is scaled
+    mesh_scaled = Signal(float)  # Emits the scale factor
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -54,7 +57,6 @@ class LoaderPanel(QWidget):
             QPushButton {
                 background-color: white;
                 color: black;
-                font-weight: bold;
                 border: 1px solid #ccc;
                 border-radius: 4px;
             }
@@ -94,6 +96,23 @@ class LoaderPanel(QWidget):
         info_layout.addRow("Watertight:", self._watertight_label)
         
         layout.addWidget(info_group)
+        
+        # Scale section
+        scale_group = QGroupBox("Scale Model")
+        scale_layout = QHBoxLayout(scale_group)
+        
+        self._scale_spin = create_spinbox(
+            1.0, 0.01, 100.0, step=0.1, decimals=2, suffix="×"
+        )
+        self._scale_spin.setToolTip("Scale factor (1.0 = original size)")
+        scale_layout.addWidget(self._scale_spin, stretch=1)
+        
+        self._apply_scale_btn = QPushButton("Apply")
+        self._apply_scale_btn.setEnabled(False)
+        self._apply_scale_btn.clicked.connect(self._on_apply_scale)
+        scale_layout.addWidget(self._apply_scale_btn)
+        
+        layout.addWidget(scale_group)
         
         # Material selection
         material_group = QGroupBox("Material")
@@ -154,6 +173,10 @@ class LoaderPanel(QWidget):
             # Update mesh info
             self._update_mesh_info()
             
+            # Enable scale button
+            self._apply_scale_btn.setEnabled(True)
+            self._scale_spin.setValue(1.0)
+            
             # Emit signal
             self.stl_loaded.emit(self._loader)
             
@@ -200,6 +223,44 @@ class LoaderPanel(QWidget):
         self._dimensions_label.setText("-")
         self._volume_label.setText("-")
         self._watertight_label.setText("-")
+        self._apply_scale_btn.setEnabled(False)
+    
+    def _on_apply_scale(self) -> None:
+        """Apply scale factor to the loaded mesh."""
+        if self._loader is None or self._loader.mesh is None:
+            return
+        
+        scale_factor = self._scale_spin.value()
+        if scale_factor == 1.0:
+            return  # No scaling needed
+        
+        try:
+            # Scale the mesh
+            self._loader.mesh.apply_scale(scale_factor)
+            
+            # Update info (recalculate after scaling)
+            self._loader.info = None  # Clear cached info
+            self._loader._compute_info()  # Recalculate
+            self._update_mesh_info()
+            
+            # Reset scale spinbox
+            self._scale_spin.setValue(1.0)
+            
+            # Emit signal
+            self.mesh_scaled.emit(scale_factor)
+            
+            QMessageBox.information(
+                self,
+                "Scale Applied",
+                f"Model scaled by {scale_factor:.2f}×"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Scale Error",
+                f"Failed to scale mesh:\n\n{str(e)}"
+            )
     
     @property
     def loader(self) -> Optional[MeshLoader]:

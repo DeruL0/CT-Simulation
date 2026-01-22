@@ -142,7 +142,7 @@ class DICOMExporter:
             
             # Save file
             filename = output_dir / f"CT_{i:04d}.dcm"
-            ds.save_as(filename, write_like_original=False)
+            ds.save_as(filename, enforce_file_format=True)
             created_files.append(filename)
             
             # Report progress

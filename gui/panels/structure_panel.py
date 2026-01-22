@@ -19,6 +19,7 @@ from simulation.structures import StructureModifier
 from .pages.lattice_page import LatticePage
 from .pages.defects_page import DefectsPage
 from .pages.manual_page import ManualPage
+from ..utils import update_stack_sizing
 
 
 class StructurePanel(QWidget):
@@ -156,14 +157,7 @@ class StructurePanel(QWidget):
 
     def _update_stack_sizing(self, index):
         """Update stack widget size policy to fit current page."""
-        for i in range(self._stack.count()):
-            widget = self._stack.widget(i)
-            if i == index:
-                widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-                widget.updateGeometry()
-            else:
-                widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self._stack.adjustSize()
+        update_stack_sizing(self._stack, index)
 
     def get_active_config(self):
         """

@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         
         self._stl_loader: Optional[STLLoader] = None
         self._ct_volume: Optional[CTVolume] = None
+        self._compression_results: Optional[list] = None  # Store list of CompressionResult
         self._worker: Optional[QThread] = None
         self._progress_dialog: Optional[QProgressDialog] = None
         
@@ -196,6 +197,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         """Connect widget signals."""
         self._loader_panel.stl_loaded.connect(self._on_stl_loaded)
+        self._loader_panel.mesh_scaled.connect(self._on_mesh_scaled)
         self._params_panel.params_changed.connect(self._on_params_changed)
         
         # Compression panel signals
@@ -273,6 +275,30 @@ class MainWindow(QMainWindow):
             f"({loader.info.num_faces:,} faces)"
         )
     
+    def _on_mesh_scaled(self, scale_factor: float) -> None:
+        """Handle mesh scaling."""
+        # Reset data when scaled to avoid stale caches
+        self._ct_volume = None
+        self._compression_results = None
+        self._data_manager.clear_voxel_grid()
+        self._compression_panel.clear_results()
+        if hasattr(self, '_structure_panel'):
+            self._structure_panel.reset_structure()
+        
+        # Reset viewers
+        if self._stl_loader and self._stl_loader.mesh:
+            self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
+        
+        # Update memory estimate with new dimensions
+        if self._stl_loader.info:
+             self._params_panel.update_memory_estimate(
+                 tuple(self._stl_loader.info.dimensions),
+                 self._stl_loader.info.num_faces
+             )
+        
+        self._status_bar.showMessage(f"Model scaled by {scale_factor:.2f}×. Data reset.")
+        self._export_btn.setEnabled(False)
+    
     def _on_params_changed(self) -> None:
         """Handle parameter changes - update memory estimate."""
         if self._stl_loader is not None and self._stl_loader.info is not None:
@@ -337,6 +363,7 @@ class MainWindow(QMainWindow):
     def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list) -> None:
         """Handle simulation completed."""
         self._ct_volume = ct_volume
+        self._compression_results = compression_results
         
         self._close_progress_dialog()
         
@@ -471,8 +498,14 @@ class MainWindow(QMainWindow):
         self._progress_dialog = self._create_progress_dialog("Exporting DICOM Series...")
         
         # Create worker
+        # Determine what to export: full time series if available, otherwise single volume
+        if self._compression_results and len(self._compression_results) > 1:
+            data_to_export = self._compression_results
+        else:
+            data_to_export = self._ct_volume
+
         self._worker = ExportWorker(
-            ct_volume=self._ct_volume,
+            volume_or_list=data_to_export,
             output_dir=output_dir,
             window_center=self._viewer_panel.window_center,
             window_width=self._viewer_panel.window_width

@@ -9,7 +9,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QGroupBox,
     QDoubleSpinBox, QPushButton, QSizePolicy
 )
+
 from PySide6.QtCore import Signal
+from ...utils import create_spinbox
 
 
 class ManualPage(QWidget):
@@ -33,25 +35,24 @@ class ManualPage(QWidget):
         sphere_group = QGroupBox("Add Sphere")
         sphere_layout = QFormLayout(sphere_group)
         
-        self._sphere_x = QDoubleSpinBox()
-        self._sphere_x.setRange(-1000, 1000)
-        self._sphere_x.setSuffix(" mm")
+        self._sphere_x = create_spinbox(
+            0.0, -1000, 1000, suffix=" mm"
+        )
         sphere_layout.addRow("Center X:", self._sphere_x)
         
-        self._sphere_y = QDoubleSpinBox()
-        self._sphere_y.setRange(-1000, 1000)
-        self._sphere_y.setSuffix(" mm")
+        self._sphere_y = create_spinbox(
+            0.0, -1000, 1000, suffix=" mm"
+        )
         sphere_layout.addRow("Center Y:", self._sphere_y)
         
-        self._sphere_z = QDoubleSpinBox()
-        self._sphere_z.setRange(-1000, 1000)
-        self._sphere_z.setSuffix(" mm")
+        self._sphere_z = create_spinbox(
+            0.0, -1000, 1000, suffix=" mm"
+        )
         sphere_layout.addRow("Center Z:", self._sphere_z)
         
-        self._sphere_r = QDoubleSpinBox()
-        self._sphere_r.setRange(0.1, 100)
-        self._sphere_r.setValue(5.0)
-        self._sphere_r.setSuffix(" mm")
+        self._sphere_r = create_spinbox(
+            5.0, 0.1, 100, suffix=" mm"
+        )
         sphere_layout.addRow("Radius:", self._sphere_r)
         
         self._add_sphere_btn = QPushButton("Add Sphere")
@@ -64,43 +65,39 @@ class ManualPage(QWidget):
         cyl_group = QGroupBox("Add Cylinder")
         cyl_layout = QFormLayout(cyl_group)
         
-        self._cyl_x1 = QDoubleSpinBox()
-        self._cyl_x1.setRange(-1000, 1000)
-        self._cyl_x1.setSuffix(" mm")
+        self._cyl_x1 = create_spinbox(
+            0.0, -1000, 1000, suffix=" mm"
+        )
         cyl_layout.addRow("Start X:", self._cyl_x1)
         
-        self._cyl_y1 = QDoubleSpinBox()
-        self._cyl_y1.setRange(-1000, 1000)
-        self._cyl_y1.setSuffix(" mm")
+        self._cyl_y1 = create_spinbox(
+            0.0, -1000, 1000, suffix=" mm"
+        )
         cyl_layout.addRow("Start Y:", self._cyl_y1)
         
-        self._cyl_z1 = QDoubleSpinBox()
-        self._cyl_z1.setRange(-1000, 1000)
-        self._cyl_z1.setSuffix(" mm")
+        self._cyl_z1 = create_spinbox(
+            0.0, -1000, 1000, suffix=" mm"
+        )
         cyl_layout.addRow("Start Z:", self._cyl_z1)
         
-        self._cyl_x2 = QDoubleSpinBox()
-        self._cyl_x2.setRange(-1000, 1000)
-        self._cyl_x2.setValue(10.0)
-        self._cyl_x2.setSuffix(" mm")
+        self._cyl_x2 = create_spinbox(
+            10.0, -1000, 1000, suffix=" mm"
+        )
         cyl_layout.addRow("End X:", self._cyl_x2)
         
-        self._cyl_y2 = QDoubleSpinBox()
-        self._cyl_y2.setRange(-1000, 1000)
-        self._cyl_y2.setValue(10.0)
-        self._cyl_y2.setSuffix(" mm")
+        self._cyl_y2 = create_spinbox(
+            10.0, -1000, 1000, suffix=" mm"
+        )
         cyl_layout.addRow("End Y:", self._cyl_y2)
         
-        self._cyl_z2 = QDoubleSpinBox()
-        self._cyl_z2.setRange(-1000, 1000)
-        self._cyl_z2.setValue(10.0)
-        self._cyl_z2.setSuffix(" mm")
+        self._cyl_z2 = create_spinbox(
+            10.0, -1000, 1000, suffix=" mm"
+        )
         cyl_layout.addRow("End Z:", self._cyl_z2)
         
-        self._cyl_r = QDoubleSpinBox()
-        self._cyl_r.setRange(0.1, 100)
-        self._cyl_r.setValue(2.0)
-        self._cyl_r.setSuffix(" mm")
+        self._cyl_r = create_spinbox(
+            2.0, 0.1, 100, suffix=" mm"
+        )
         cyl_layout.addRow("Radius:", self._cyl_r)
         
         self._add_cyl_btn = QPushButton("Add Cylinder")

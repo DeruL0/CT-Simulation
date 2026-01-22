@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from simulation.structures import DefectShape, DefectConfig
+from ...utils import create_spinbox
 
 
 class DefectsPage(QWidget):
@@ -49,12 +50,9 @@ class DefectsPage(QWidget):
             lambda v: self._porosity_spin.setValue(v)
         )
         
-        self._porosity_spin = QSpinBox()
-        self._porosity_spin.setRange(1, 50)
-        self._porosity_spin.setValue(5)
-        self._porosity_spin.setSuffix(" %")
-        self._porosity_spin.valueChanged.connect(
-            lambda v: self._porosity_slider.setValue(v)
+        self._porosity_spin = create_spinbox(
+            5, 1, 50, suffix=" %",
+            callback=lambda v: self._porosity_slider.setValue(v)
         )
         
         porosity_layout.addWidget(self._porosity_slider)
@@ -62,16 +60,14 @@ class DefectsPage(QWidget):
         form_layout.addRow("Porosity:", porosity_widget)
         
         # Pore size (complexity)
-        self._size_mean_spin = QDoubleSpinBox()
-        self._size_mean_spin.setRange(0.5, 20.0)
-        self._size_mean_spin.setValue(2.0)
-        self._size_mean_spin.setSuffix(" mm")
+        self._size_mean_spin = create_spinbox(
+            2.0, 0.5, 20.0, suffix=" mm"
+        )
         form_layout.addRow("Mean Size:", self._size_mean_spin)
         
-        self._size_std_spin = QDoubleSpinBox()
-        self._size_std_spin.setRange(0.0, 10.0)
-        self._size_std_spin.setValue(0.5)
-        self._size_std_spin.setSuffix(" mm")
+        self._size_std_spin = create_spinbox(
+            0.5, 0.0, 10.0, suffix=" mm"
+        )
         form_layout.addRow("Size Std:", self._size_std_spin)
         
         # Shell Preservation
@@ -80,10 +76,9 @@ class DefectsPage(QWidget):
         self._preserve_shell_check.stateChanged.connect(self._on_shell_toggled)
         form_layout.addRow(self._preserve_shell_check)
         
-        self._shell_thickness_spin = QDoubleSpinBox()
-        self._shell_thickness_spin.setRange(0.1, 100.0)
-        self._shell_thickness_spin.setValue(2.0)
-        self._shell_thickness_spin.setSuffix(" mm")
+        self._shell_thickness_spin = create_spinbox(
+            2.0, 0.1, 100.0, suffix=" mm"
+        )
         self._shell_thickness_spin.setEnabled(False)
         form_layout.addRow("Shell Thickness:", self._shell_thickness_spin)
         

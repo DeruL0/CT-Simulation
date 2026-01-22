@@ -18,6 +18,8 @@ from PySide6.QtCore import Qt, Signal
 import logging
 import numpy as np
 
+from ..utils import create_spinbox
+
 
 class CompressionPanel(QWidget):
     """
@@ -83,36 +85,34 @@ class CompressionPanel(QWidget):
         params_layout.addRow("Axis:", self._axis_combo)
         
         # Total Compression
-        self._compression_spin = QDoubleSpinBox()
-        self._compression_spin.setRange(1.0, 50.0)
-        self._compression_spin.setValue(20.0)
-        self._compression_spin.setSuffix(" %")
-        self._compression_spin.setDecimals(1)
+        self._compression_spin = create_spinbox(
+            20.0, 1.0, 50.0, step=1.0, decimals=1, suffix=" %",
+            callback=lambda: self.config_changed.emit()
+        )
         params_layout.addRow("Compression:", self._compression_spin)
         
         # Steps
-        self._steps_spin = QSpinBox()
-        self._steps_spin.setRange(2, 20)
-        self._steps_spin.setValue(5)
+        self._steps_spin = create_spinbox(
+            5, 2, 20, callback=lambda: self.config_changed.emit()
+        )
         params_layout.addRow("Time Steps:", self._steps_spin)
         
         # Poisson
-        self._poisson_spin = QDoubleSpinBox()
-        self._poisson_spin.setRange(0.0, 0.49)
-        self._poisson_spin.setValue(0.3)
-        self._poisson_spin.setDecimals(2)
+        self._poisson_spin = create_spinbox(
+            0.3, 0.0, 0.49, step=1.0, decimals=2,
+            callback=lambda: self.config_changed.emit()
+        )
         params_layout.addRow("Poisson Ratio:", self._poisson_spin)
         
         # Physics settings
-        self._downsample_spin = QSpinBox()
-        self._downsample_spin.setRange(2, 16)
-        self._downsample_spin.setValue(4)
+        self._downsample_spin = create_spinbox(
+            4, 2, 16
+        )
         params_layout.addRow("Downsample:", self._downsample_spin)
         
-        self._iterations_spin = QSpinBox()
-        self._iterations_spin.setRange(50, 1000)
-        self._iterations_spin.setValue(300)
-        self._iterations_spin.setSingleStep(50)
+        self._iterations_spin = create_spinbox(
+            300, 50, 1000, step=50
+        )
         params_layout.addRow("Iterations:", self._iterations_spin)
         
         self._gpu_check = QCheckBox("Use GPU")
@@ -162,9 +162,6 @@ class CompressionPanel(QWidget):
         # Emit config_changed on any parameter change
         self._mode_combo.currentIndexChanged.connect(lambda: self.config_changed.emit())
         self._axis_combo.currentIndexChanged.connect(lambda: self.config_changed.emit())
-        self._compression_spin.valueChanged.connect(lambda: self.config_changed.emit())
-        self._steps_spin.valueChanged.connect(lambda: self.config_changed.emit())
-        self._poisson_spin.valueChanged.connect(lambda: self.config_changed.emit())
         self._main_group.toggled.connect(lambda: self.config_changed.emit())
     
     def _on_mode_changed(self):
