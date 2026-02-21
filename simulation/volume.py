@@ -15,7 +15,7 @@ class CTVolume:
     Reconstructed CT volume with metadata.
     
     Attributes:
-        data: 3D numpy array of Hounsfield Units (Z, Y, X)
+        data: 3D numpy array of linear attenuation values (cm^-1) in (Z, Y, X)
         voxel_size: Voxel edge length in mm
         origin: World coordinates of volume origin
     """
@@ -46,11 +46,11 @@ class CTVolume:
         window_width: float
     ) -> np.ndarray:
         """
-        Apply windowing to convert HU values to display range [0, 255].
+        Apply windowing to convert attenuation values to display range [0, 255].
         
         Args:
-            window_center: Center of the window in HU
-            window_width: Width of the window in HU
+            window_center: Center of the display window
+            window_width: Width of the display window
             
         Returns:
             uint8 array suitable for display

@@ -53,7 +53,7 @@ class SimulationWorker(QThread):
     """Background worker for CT simulation."""
     
     progress = Signal(float)
-    finished = Signal(object, dict, list)  # Emits (CTVolume, timing_info, compression_results)
+    finished = Signal(object, dict, list, object)  # (CTVolume, timing_info, compression_results, annotations)
     error = Signal(str)
     
     def __init__(
@@ -73,6 +73,7 @@ class SimulationWorker(QThread):
         physics_tube_current: int = 200,
         physics_filtration: float = 2.5,
         physics_energy_bins: int = 10,
+        physics_exposure_multiplier: float = 1.0,
         voxel_grid=None,  # Optional pre-computed VoxelGrid
         structure_config=None,  # Optional (method_name, config) for deferred generation
         compression_config=None  # Optional dict from CompressionPanel.get_config()
@@ -94,6 +95,7 @@ class SimulationWorker(QThread):
         self.physics_tube_current = physics_tube_current
         self.physics_filtration = physics_filtration
         self.physics_energy_bins = physics_energy_bins
+        self.physics_exposure_multiplier = physics_exposure_multiplier
         # Pre-computed voxel grid (from StructurePanel)
         self.voxel_grid = voxel_grid
         # Deferred structure configuration
@@ -157,6 +159,7 @@ class SimulationWorker(QThread):
             tracker.end_phase()  # End voxelization phase
 
             # ===== PHASE 1: Deferred Structure Generation =====
+            initial_annotations = None  # Will be set if structure generation runs
             if self.structure_config is not None:
                 logging.info("=" * 50)
                 logging.info("PHASE 2: Structure Generation")
@@ -181,13 +184,18 @@ class SimulationWorker(QThread):
                 logging.info(f"  preserve_shell={getattr(config, 'preserve_shell', False)}, "
                             f"shell_thickness={getattr(config, 'shell_thickness_mm', 0)}mm")
                 
+                initial_annotations = None
                 if method_name == "generate_lattice":
-                    modifier.generate_lattice(config, progress_callback=struct_progress)
+                    voxel_grid, initial_annotations = modifier.generate_lattice(config, progress_callback=struct_progress)
                 elif method_name == "generate_random_voids":
-                    modifier.generate_random_voids(config, progress_callback=struct_progress)
+                    voxel_grid, initial_annotations = modifier.generate_random_voids(config, progress_callback=struct_progress)
+                else:
+                    voxel_grid = modifier.grid
                     
                 timing_info['structure_time'] = time.perf_counter() - struct_start
                 logging.info(f"  Structure generation completed in {timing_info['structure_time']:.2f}s")
+                if initial_annotations:
+                    logging.info(f"  Annotations: {len(initial_annotations.voids)} voids annotated")
                 voxel_grid = modifier.grid
                 tracker.end_phase()  # End structure phase
             
@@ -215,6 +223,7 @@ class SimulationWorker(QThread):
                     kvp=self.physics_kvp,
                     tube_current_ma=self.physics_tube_current,
                     filtration_mm_al=self.physics_filtration,
+                    exposure_multiplier=self.physics_exposure_multiplier,
                     energy_bins=self.physics_energy_bins,
                     use_gpu=self.use_gpu
                 )
@@ -262,7 +271,8 @@ class SimulationWorker(QThread):
                 from simulation.mechanics.manager import CompressionConfig, CompressionResult
                 
                 cfg = self.compression_config
-                manager = CompressionManager(use_gpu=cfg.get('use_gpu', True))
+                # Compression acceleration follows the main simulation GPU setting.
+                manager = CompressionManager(use_gpu=self.use_gpu)
                 
                 comp_config = CompressionConfig(
                     total_compression=cfg['total_compression'],
@@ -272,7 +282,6 @@ class SimulationWorker(QThread):
                     use_physics=cfg['mode'] == 'physical',
                     downsample_factor=cfg.get('downsample_factor', 4),
                     solver_iterations=cfg.get('solver_iterations', 300),
-                    use_gpu=cfg.get('use_gpu', True),
                     export_dicom=False
                 )
                 
@@ -288,7 +297,8 @@ class SimulationWorker(QThread):
                     voxel_data,
                     voxel_grid.voxel_size,
                     comp_config,
-                    progress_callback=phys_progress
+                    progress_callback=phys_progress,
+                    initial_annotations=initial_annotations if self.structure_config else None,
                 )
                 tracker.end_phase()  # End physics phase
                 
@@ -321,11 +331,19 @@ class SimulationWorker(QThread):
                         )
                         
                         # Run CT simulation on this deformed grid
-                        step_ct = simulator.simulate(
-                            deformed_grid,
-                            material=self.material,
-                            progress_callback=step_cb
-                        )
+                        if self.physics_mode:
+                            step_ct = simulator.simulate(
+                                deformed_grid,
+                                material=self.material,
+                                density_scale=getattr(deform_result, 'density_scale', 1.0),
+                                progress_callback=step_cb
+                            )
+                        else:
+                            step_ct = simulator.simulate(
+                                deformed_grid,
+                                material=self.material,
+                                progress_callback=step_cb
+                            )
                         step_ct_data = step_ct.data
                         step_ct_voxel_size = step_ct.voxel_size
                     
@@ -334,7 +352,9 @@ class SimulationWorker(QThread):
                         step_index=deform_result.step_index,
                         compression_ratio=deform_result.compression_ratio,
                         _volume=step_ct_data,  # Use CT simulated data
-                        voxel_size=step_ct_voxel_size
+                        voxel_size=step_ct_voxel_size,
+                        density_scale=getattr(deform_result, 'density_scale', 1.0),
+                        annotations=deform_result.annotations,
                     ))
                 
                 timing_info['compression_time'] = time.perf_counter() - comp_start
@@ -356,7 +376,11 @@ class SimulationWorker(QThread):
             logging.info("=" * 50)
             
             self.progress.emit(1.0)
-            self.finished.emit(ct_volume, timing_info, compression_results)
+            # Emit annotations: use initial_annotations if no compression, otherwise embedded in compression_results
+            annotations_out = None
+            if self.structure_config is not None:
+                annotations_out = initial_annotations
+            self.finished.emit(ct_volume, timing_info, compression_results, annotations_out)
             
         except Exception as e:
             import traceback
@@ -376,13 +400,15 @@ class ExportWorker(QThread):
         volume_or_list,  # CTVolume or list of CTVolume/CompressionResult
         output_dir: str,
         window_center: float,
-        window_width: float
+        window_width: float,
+        initial_annotations=None,  # AnnotationSet for single-volume export
     ):
         super().__init__()
         self.volume_or_list = volume_or_list
         self.output_dir = output_dir
         self.window_center = window_center
         self.window_width = window_width
+        self.initial_annotations = initial_annotations
     
     def run(self):
         try:
@@ -401,16 +427,19 @@ class ExportWorker(QThread):
                         vol_data = item.volume
                         voxel_size = item.voxel_size
                         origin = getattr(item, 'origin', np.zeros(3))
+                        step_annotations = getattr(item, 'annotations', None)
                     elif hasattr(item, 'data'):
                         # It's a CTVolume
                         vol_data = item.data
                         voxel_size = item.voxel_size
                         origin = item.origin
+                        step_annotations = None
                     else:
                         # Assume numpy array
                         vol_data = item
                         voxel_size = 0.5  # Default fallback
                         origin = np.zeros(3)
+                        step_annotations = None
                         
                     # Create subdirectory (parents=True for nested paths)
                     step_dir = Path(self.output_dir) / f"Step_{i:02d}"
@@ -436,6 +465,15 @@ class ExportWorker(QThread):
                     )
                     all_files.extend(files)
                     
+                    # Save annotations for this step
+                    if step_annotations is not None:
+                        try:
+                            step_annotations.save_json(step_dir / "annotations.json")
+                            step_annotations.save_coco_json(step_dir / "coco_annotations.json")
+                            step_annotations.save_label_volume(step_dir / "labels.npy")
+                        except Exception as ann_err:
+                            logging.warning(f"Failed to save annotations for step {i}: {ann_err}")
+                    
             else:
                 # Single volume
                 files = exporter.export(
@@ -446,6 +484,16 @@ class ExportWorker(QThread):
                     progress_callback=self.progress.emit
                 )
                 all_files.extend(files)
+                
+                # Save initial annotations for single volume
+                if self.initial_annotations is not None:
+                    try:
+                        out_dir = Path(self.output_dir)
+                        self.initial_annotations.save_json(out_dir / "annotations.json")
+                        self.initial_annotations.save_coco_json(out_dir / "coco_annotations.json")
+                        self.initial_annotations.save_label_volume(out_dir / "labels.npy")
+                    except Exception as ann_err:
+                        logging.warning(f"Failed to save annotations: {ann_err}")
             
             self.finished.emit(all_files)
             
@@ -459,7 +507,7 @@ class StructureWorker(QThread):
     """Background worker for structure generation."""
     
     progress = Signal(float)
-    finished = Signal(object)  # Emits VoxelGrid
+    finished = Signal(object, object)  # Emits (VoxelGrid, AnnotationSet)
     error = Signal(str)
     
     def __init__(
@@ -507,13 +555,14 @@ class StructureWorker(QThread):
                 self.progress.emit(total_progress)
             
             # Run generation with progress
+            annotations = None
             if self.method_name == "generate_lattice":
-                self.modifier.generate_lattice(self.config, progress_callback=on_progress)
+                _, annotations = self.modifier.generate_lattice(self.config, progress_callback=on_progress)
             elif self.method_name == "generate_random_voids":
-                self.modifier.generate_random_voids(self.config, progress_callback=on_progress)
+                _, annotations = self.modifier.generate_random_voids(self.config, progress_callback=on_progress)
             
             self.progress.emit(1.0)
-            self.finished.emit(self.modifier.grid)
+            self.finished.emit(self.modifier.grid, annotations)
             
         except Exception as e:
             import traceback

@@ -1,24 +1,21 @@
 """
 Material Properties Database
 
-Provides X-ray attenuation properties and Hounsfield Unit values
-for different materials used in CT simulation.
+Provides absolute linear attenuation properties for materials used in CT simulation.
 
-This unified module supports both simplified (HU-based) and
-physics-based (energy-dependent attenuation) simulation modes.
+The core quantity is the linear attenuation coefficient:
+    mu(E) = density * (mu/rho)(E)
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Dict, Optional, Mapping, Iterator, Any
 from enum import Enum
 import numpy as np
-
-if TYPE_CHECKING:
-    from .physics.attenuation import AttenuationDatabase
 
 
 class MaterialType(Enum):
     """Standard material types for CT simulation."""
+
     AIR = "air"
     WATER = "water"
     FAT = "fat"
@@ -29,356 +26,402 @@ class MaterialType(Enum):
     BONE_CANCELLOUS = "bone_cancellous"
     BONE_CORTICAL = "bone_cortical"
     CALCIUM = "calcium"
+
+    # Generic metallic aliases
     TITANIUM = "titanium"
     STEEL = "steel"
     ALUMINUM = "aluminum"
+    COPPER = "copper"
+    GOLD = "gold"
+
+    # Industrial-specific material definitions
+    ALUMINUM_6061 = "aluminum_6061"
+    TITANIUM_ALLOY = "titanium_alloy"
+    CARBON_STEEL = "carbon_steel"
+    STAINLESS_STEEL_304 = "stainless_steel_304"
+    STAINLESS_STEEL_316 = "stainless_steel_316"
+
+    # High-Z / contrast-like materials
     IODINE_CONTRAST = "iodine_contrast"
-    # Industrial/Common materials
+    BARIUM_CONTRAST = "barium_contrast"
+    GADOLINIUM_CONTRAST = "gadolinium_contrast"
+
+    # Industrial/Common non-metallics
     PLASTIC_PVC = "plastic_pvc"
     PLASTIC_PE = "plastic_pe"
     FOAM_SPONGE = "foam_sponge"
     RUBBER = "rubber"
-    # Food materials
+
+    # Food materials (kept for legacy/demo workflows)
     BREAD = "bread"
     CHOCOLATE = "chocolate"
     CHEESE = "cheese"
     FRUIT = "fruit"
+
     CUSTOM = "custom"
 
 
 @dataclass
 class Material:
     """
-    Unified material properties for CT simulation.
-    
-    Supports both simplified (HU-based) and physics-based simulation.
-    
+    Material properties for CT simulation.
+
     Attributes:
         name: Human-readable name
-        hounsfield_unit: CT number in Hounsfield Units (HU)
-        density: Physical density in g/cm³
+        density: Physical density in g/cm^3
         color: RGB color for visualization (0-255)
-        attenuation_key: Key in AttenuationDatabase (for physics mode)
+        attenuation_key: Key in AttenuationDatabase (for energy-dependent physics)
+        reference_energy_keV: Reference energy used for `linear_attenuation`
     """
+
     name: str
-    hounsfield_unit: float
-    density: float  # g/cm³
+    density: float  # g/cm^3
     color: tuple = (128, 128, 128)  # RGB (0-255)
-    attenuation_key: Optional[str] = None  # For physics mode
-    
+    attenuation_key: Optional[str] = None
+    reference_energy_keV: float = 100.0
+
     @property
     def linear_attenuation(self) -> float:
         """
-        Approximate linear attenuation coefficient at 100 keV.
-        
-        Uses simplified relationship: μ ≈ μ_water * (HU/1000 + 1)
-        where μ_water ≈ 0.171 cm⁻¹ at 100 keV
-        """
-        mu_water = 0.171  # cm⁻¹ at 100 keV
-        return mu_water * (self.hounsfield_unit / 1000.0 + 1.0)
-    
-    def get_mu(self, energy: float) -> float:
-        """
-        Get linear attenuation coefficient at given energy (cm⁻¹).
-        
-        Uses NIST data if attenuation_key is set, otherwise uses
-        simplified HU-based approximation.
+        Absolute linear attenuation coefficient at reference energy (cm^-1).
+
+        Preferred path uses attenuation table lookup and density scaling.
+        Fallback uses density-scaled water-like approximation.
         """
         if self.attenuation_key:
             from .physics.attenuation import get_attenuation_database
+
             db = get_attenuation_database()
             table = db.get_table(self.attenuation_key)
             if table is not None:
-                mu_rho = table.get_mu_rho(energy)
-                return mu_rho * self.density
-        # Fallback to simplified model
-        return self.linear_attenuation
-    
-    def get_mu_array(self, energies: np.ndarray) -> np.ndarray:
-        """Get linear attenuation coefficients for array of energies."""
+                return table.get_mu_rho(self.reference_energy_keV) * self.density
+
+        # Fallback for materials without explicit attenuation data.
+        return 0.171 * self.density
+
+    def get_mu(self, energy: float) -> float:
+        """Get linear attenuation coefficient at energy (cm^-1)."""
         if self.attenuation_key:
             from .physics.attenuation import get_attenuation_database
+
+            db = get_attenuation_database()
+            table = db.get_table(self.attenuation_key)
+            if table is not None:
+                return table.get_mu_rho(energy) * self.density
+        return self.linear_attenuation
+
+    def get_mu_array(self, energies: np.ndarray) -> np.ndarray:
+        """Get linear attenuation coefficients for an array of energies."""
+        if self.attenuation_key:
+            from .physics.attenuation import get_attenuation_database
+
             db = get_attenuation_database()
             table = db.get_table(self.attenuation_key)
             if table is not None:
                 mu_rho = np.interp(energies, table.energies, table.mu_rho)
                 return mu_rho * self.density
-        # Fallback: constant across energies
         return np.full_like(energies, self.linear_attenuation)
 
 
 class MaterialDatabase:
     """
     Database of material properties for CT simulation.
-    
-    Provides Hounsfield Unit values based on clinical CT standards.
-    Reference: Radiological standards and NIST XCOM database.
+
+    Uses absolute density and energy-dependent attenuation keys.
     """
-    
-    # Standard material definitions
-    # HU values from: https://radiopaedia.org/articles/hounsfield-unit
+
     _MATERIALS: Dict[MaterialType, Material] = {
         MaterialType.AIR: Material(
-            name="Air",
-            hounsfield_unit=-1000.0,
+            name="Dry Air",
             density=0.001205,
             color=(20, 20, 40),
-            attenuation_key="air"
+            attenuation_key="air",
         ),
         MaterialType.WATER: Material(
-            name="Water",
-            hounsfield_unit=0.0,
-            density=1.0,
+            name="Liquid Water",
+            density=1.000,
             color=(0, 100, 200),
-            attenuation_key="water"
+            attenuation_key="water",
         ),
         MaterialType.FAT: Material(
             name="Fat",
-            hounsfield_unit=-100.0,
-            density=0.92,
+            density=0.920,
             color=(255, 220, 150),
-            attenuation_key="adipose"
+            attenuation_key="adipose",
         ),
         MaterialType.SOFT_TISSUE: Material(
             name="Soft Tissue",
-            hounsfield_unit=40.0,
-            density=1.06,
+            density=1.060,
             color=(255, 180, 180),
-            attenuation_key="soft_tissue"
+            attenuation_key="soft_tissue",
         ),
         MaterialType.MUSCLE: Material(
             name="Muscle",
-            hounsfield_unit=40.0,
-            density=1.05,
+            density=1.050,
             color=(180, 80, 80),
-            attenuation_key="muscle"
+            attenuation_key="muscle",
         ),
         MaterialType.BLOOD: Material(
             name="Blood",
-            hounsfield_unit=55.0,
-            density=1.06,
+            density=1.060,
             color=(200, 0, 0),
-            attenuation_key="soft_tissue"  # Approximate
+            attenuation_key="soft_tissue",
         ),
         MaterialType.LIVER: Material(
             name="Liver",
-            hounsfield_unit=60.0,
-            density=1.05,
+            density=1.050,
             color=(160, 82, 45),
-            attenuation_key="soft_tissue"  # Approximate
+            attenuation_key="soft_tissue",
         ),
         MaterialType.BONE_CANCELLOUS: Material(
             name="Cancellous Bone",
-            hounsfield_unit=400.0,
-            density=1.18,
+            density=1.180,
             color=(200, 200, 180),
-            attenuation_key="bone_cancellous"
+            attenuation_key="bone_cancellous",
         ),
         MaterialType.BONE_CORTICAL: Material(
             name="Cortical Bone",
-            hounsfield_unit=1000.0,
-            density=1.85,
+            density=1.850,
             color=(255, 255, 240),
-            attenuation_key="bone_cortical"
+            attenuation_key="bone_cortical",
         ),
         MaterialType.CALCIUM: Material(
             name="Calcium",
-            hounsfield_unit=1500.0,
-            density=1.55,
+            density=1.550,
             color=(255, 255, 255),
-            attenuation_key="calcium"
-        ),
-        MaterialType.TITANIUM: Material(
-            name="Titanium",
-            hounsfield_unit=3000.0,
-            density=4.5,
-            color=(180, 180, 200),
-            attenuation_key="titanium"
-        ),
-        MaterialType.STEEL: Material(
-            name="Stainless Steel",
-            hounsfield_unit=8000.0,
-            density=7.87,
-            color=(150, 150, 160),
-            attenuation_key="iron"
+            attenuation_key="calcium",
         ),
         MaterialType.ALUMINUM: Material(
             name="Aluminum",
-            hounsfield_unit=1500.0,
-            density=2.7,
+            density=2.700,
             color=(200, 200, 210),
-            attenuation_key="aluminum"
+            attenuation_key="aluminum",
+        ),
+        MaterialType.ALUMINUM_6061: Material(
+            name="Aluminum 6061",
+            density=2.700,
+            color=(205, 205, 215),
+            attenuation_key="aluminum_6061",
+        ),
+        MaterialType.TITANIUM: Material(
+            name="Pure Titanium",
+            density=4.506,
+            color=(180, 180, 200),
+            attenuation_key="titanium",
+        ),
+        MaterialType.TITANIUM_ALLOY: Material(
+            name="Ti-6Al-4V",
+            density=4.430,
+            color=(175, 175, 195),
+            attenuation_key="titanium_alloy",
+        ),
+        MaterialType.STEEL: Material(
+            name="Stainless Steel",
+            density=7.930,
+            color=(150, 150, 160),
+            attenuation_key="stainless_steel_304",
+        ),
+        MaterialType.CARBON_STEEL: Material(
+            name="Carbon Steel",
+            density=7.860,
+            color=(135, 135, 145),
+            attenuation_key="carbon_steel",
+        ),
+        MaterialType.STAINLESS_STEEL_304: Material(
+            name="Stainless Steel 304",
+            density=7.930,
+            color=(148, 148, 160),
+            attenuation_key="stainless_steel_304",
+        ),
+        MaterialType.STAINLESS_STEEL_316: Material(
+            name="Stainless Steel 316",
+            density=8.000,
+            color=(145, 145, 158),
+            attenuation_key="stainless_steel_316",
+        ),
+        MaterialType.COPPER: Material(
+            name="Copper",
+            density=8.960,
+            color=(170, 120, 90),
+            attenuation_key="copper",
+        ),
+        MaterialType.GOLD: Material(
+            name="Pure Gold (Z=79)",
+            density=19.320,
+            color=(230, 180, 30),
+            attenuation_key="gold",
         ),
         MaterialType.IODINE_CONTRAST: Material(
-            name="Iodine Contrast",
-            hounsfield_unit=300.0,
-            density=1.03,
+            name="Iodine",
+            density=4.930,
             color=(255, 200, 0),
-            attenuation_key="iodine"
+            attenuation_key="iodine",
         ),
-        # Industrial/Common materials
+        MaterialType.BARIUM_CONTRAST: Material(
+            name="Barium",
+            density=3.620,
+            color=(250, 245, 180),
+            attenuation_key="barium",
+        ),
+        MaterialType.GADOLINIUM_CONTRAST: Material(
+            name="Gadolinium",
+            density=7.900,
+            color=(220, 220, 240),
+            attenuation_key="gadolinium",
+        ),
         MaterialType.PLASTIC_PVC: Material(
-            name="PVC Plastic",
-            hounsfield_unit=100.0,  # ~50-150 HU typical
-            density=1.4,
+            name="PVC",
+            density=1.400,
             color=(200, 200, 220),
-            attenuation_key=None  # Use HU approximation
+            attenuation_key="pvc",
         ),
         MaterialType.PLASTIC_PE: Material(
-            name="Polyethylene",
-            hounsfield_unit=-70.0,  # Low density plastic
-            density=0.95,
+            name="Polyethylene (PE)",
+            density=0.950,
             color=(240, 240, 250),
-            attenuation_key=None
+            attenuation_key="polyethylene",
         ),
         MaterialType.FOAM_SPONGE: Material(
-            name="Foam/Sponge",
-            hounsfield_unit=-700.0,  # Very low density
-            density=0.03,
+            name="PU Foam / Sponge",
+            density=0.030,
             color=(255, 255, 200),
-            attenuation_key=None
+            attenuation_key="polyurethane_foam",
         ),
         MaterialType.RUBBER: Material(
             name="Rubber",
-            hounsfield_unit=50.0,
-            density=1.1,
+            density=1.100,
             color=(60, 60, 60),
-            attenuation_key=None
+            attenuation_key="rubber",
         ),
-        # Food materials (based on literature values)
         MaterialType.BREAD: Material(
             name="Bread",
-            hounsfield_unit=-500.0,  # Porous, air-filled structure
-            density=0.25,
+            density=0.250,
             color=(210, 180, 140),
-            attenuation_key=None
+            attenuation_key="bread",
         ),
         MaterialType.CHOCOLATE: Material(
             name="Chocolate",
-            hounsfield_unit=150.0,  # Dense, ~100-200 HU
-            density=1.25,
+            density=1.250,
             color=(80, 45, 20),
-            attenuation_key=None
+            attenuation_key="chocolate",
         ),
         MaterialType.CHEESE: Material(
             name="Cheese",
-            hounsfield_unit=80.0,  # Similar to soft tissue
-            density=1.05,
+            density=1.050,
             color=(255, 220, 100),
-            attenuation_key=None
+            attenuation_key="cheese",
         ),
         MaterialType.FRUIT: Material(
-            name="Fruit (Apple)",
-            hounsfield_unit=30.0,  # High water content
-            density=0.85,
+            name="Fruit / Apple",
+            density=0.850,
             color=(200, 50, 50),
-            attenuation_key=None
+            attenuation_key="fruit",
         ),
     }
-    
+
     def __init__(self):
-        """Initialize material database with default materials."""
         self._custom_materials: Dict[str, Material] = {}
-    
+
     def get_material(self, material_type: MaterialType) -> Material:
         """Get material properties by type."""
         if material_type == MaterialType.CUSTOM:
             raise ValueError("Use get_custom_material() for custom materials")
         return self._MATERIALS[material_type]
-    
-    def get_hu(self, material_type: MaterialType) -> float:
-        """Get Hounsfield Unit value for a material type."""
-        return self.get_material(material_type).hounsfield_unit
-    
+
     def add_custom_material(
         self,
         name: str,
-        hounsfield_unit: float,
-        density: float = 1.0,
+        density: float,
         color: tuple = (128, 128, 128),
-        attenuation_key: Optional[str] = None
+        attenuation_key: Optional[str] = None,
+        reference_energy_keV: float = 100.0,
     ) -> Material:
-        """
-        Add a custom material to the database.
-        
-        Args:
-            name: Unique material name
-            hounsfield_unit: CT number in HU
-            density: Physical density in g/cm³
-            color: RGB color for visualization
-            attenuation_key: Key in AttenuationDatabase for physics mode
-            
-        Returns:
-            The created Material object
-        """
+        """Add a custom material to the database."""
         material = Material(
             name=name,
-            hounsfield_unit=hounsfield_unit,
             density=density,
             color=color,
-            attenuation_key=attenuation_key
+            attenuation_key=attenuation_key,
+            reference_energy_keV=reference_energy_keV,
         )
         self._custom_materials[name] = material
         return material
-    
+
     def get_custom_material(self, name: str) -> Material:
         """Get a custom material by name."""
         if name not in self._custom_materials:
             raise KeyError(f"Custom material '{name}' not found")
         return self._custom_materials[name]
-    
+
     def list_materials(self) -> list:
         """List all available material types."""
         return list(MaterialType)
-    
+
     def list_custom_materials(self) -> list:
         """List all custom material names."""
         return list(self._custom_materials.keys())
-    
-    @staticmethod
-    def hu_to_normalized(hu_value: float) -> float:
-        """
-        Convert Hounsfield Units to normalized [0, 1] range.
-        
-        Uses standard CT window: [-1000, 3000] HU
-        """
-        hu_min, hu_max = -1000.0, 3000.0
-        return np.clip((hu_value - hu_min) / (hu_max - hu_min), 0.0, 1.0)
-    
-    @staticmethod
-    def normalized_to_hu(normalized: float) -> float:
-        """
-        Convert normalized [0, 1] value to Hounsfield Units.
-        
-        Uses standard CT window: [-1000, 3000] HU
-        """
-        hu_min, hu_max = -1000.0, 3000.0
-        return normalized * (hu_max - hu_min) + hu_min
 
 
 # ============== Backward Compatibility ==============
-# Aliases for physics module compatibility
 
-# Alias for PhysicalMaterial (now just Material)
 PhysicalMaterial = Material
 
-# Pre-built dictionary for physics module compatibility
-PHYSICAL_MATERIALS: Dict[str, Material] = {
-    mat_type.value: MaterialDatabase._MATERIALS[mat_type]
-    for mat_type in MaterialType
-    if mat_type != MaterialType.CUSTOM
-}
+def _material_type_from_key(material_key: Any) -> Optional[MaterialType]:
+    """Resolve a material key to MaterialType, returning None for invalid/custom keys."""
+    if isinstance(material_key, MaterialType):
+        return None if material_key == MaterialType.CUSTOM else material_key
+
+    if material_key is None:
+        return None
+
+    text = str(material_key).strip().lower()
+    if not text:
+        return None
+
+    try:
+        mat_type = MaterialType(text)
+    except ValueError:
+        return None
+    return None if mat_type == MaterialType.CUSTOM else mat_type
+
+
+class _PhysicalMaterialRegistry(Mapping[str, Material]):
+    """
+    Read-only compatibility view over MaterialDatabase.
+
+    This avoids maintaining a copied/stale physical-material dictionary.
+    """
+
+    def __getitem__(self, key: str) -> Material:
+        mat_type = _material_type_from_key(key)
+        if mat_type is None:
+            raise KeyError(key)
+        return MaterialDatabase._MATERIALS[mat_type]
+
+    def __iter__(self) -> Iterator[str]:
+        return (mat_type.value for mat_type in MaterialType if mat_type != MaterialType.CUSTOM)
+
+    def __len__(self) -> int:
+        return sum(1 for mat_type in MaterialType if mat_type != MaterialType.CUSTOM)
+
+    def get(self, key: str, default: Optional[Material] = None) -> Optional[Material]:
+        mat_type = _material_type_from_key(key)
+        if mat_type is None:
+            return default
+        return MaterialDatabase._MATERIALS.get(mat_type, default)
+
+
+PHYSICAL_MATERIALS: Mapping[str, Material] = _PhysicalMaterialRegistry()
 
 
 def get_physical_material(name: str) -> Optional[Material]:
-    """Get physical material by name (case-insensitive)."""
-    return PHYSICAL_MATERIALS.get(name.lower())
+    """Get physical material by name or key (case-insensitive)."""
+    return material_type_to_physical(name)
 
 
-def material_type_to_physical(material_type_value: str) -> Optional[Material]:
-    """
-    Convert MaterialType enum value to Material with physics support.
-    
-    Handles mapping between simple material names and physical database.
-    """
-    return PHYSICAL_MATERIALS.get(material_type_value.lower())
+def material_type_to_physical(material_type_value: Any) -> Optional[Material]:
+    """Resolve a material key or MaterialType to physical Material."""
+    mat_type = _material_type_from_key(material_type_value)
+    if mat_type is None:
+        return None
+    return MaterialDatabase._MATERIALS.get(mat_type)

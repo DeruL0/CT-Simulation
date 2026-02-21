@@ -8,7 +8,7 @@ Realistic CT simulation with polychromatic X-ray physics including:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Callable, Tuple
+from typing import Optional, Callable
 import logging
 import time
 import threading
@@ -25,16 +25,9 @@ except ImportError:
 
 
 from ..voxelizer import VoxelGrid
-from ..materials import MaterialType
+from ..materials import MaterialType, MaterialDatabase
 from .spectrum import SpectrumGenerator, XRaySpectrum
-from .attenuation import get_attenuation_database
-from .physical_material import (
-    PhysicalMaterial, 
-    PHYSICAL_MATERIALS,
-    PHYSICAL_MATERIALS,
-    material_type_to_physical
-)
-from ..backends.radon_kernels import GPURadonTransform, HAS_CUPY as RADON_HAS_CUPY
+from .physical_material import material_type_to_physical
 from ..backends import get_backend
 
 
@@ -50,20 +43,33 @@ class PhysicsConfig:
         photon_count_base: Base photon count at 200mA per detector element
         energy_bins: Number of energy bins for spectral integration
         use_gpu: Whether to use GPU acceleration
-        enable_scatter: Whether to simulate scatter (not implemented)
+        enable_scatter: Whether to simulate X-ray scatter
+        scatter_fraction: Scatter-to-Primary Ratio (0.05-0.3 typical)
+        scatter_kernel_sigma: Scatter kernel width in pixels
+        enable_motion_blur: Whether to simulate gantry motion blur
+        motion_blur_angle: Integration angle in degrees (0.5-2.0 typical)
     """
     kvp: int = 120
-    tube_current_ma: int = 200  # mA
+    tube_current_ma: int = 400  # mA
     filtration_mm_al: float = 2.5
-    photon_count_base: float = 1e5  # Photons per detector element at 200mA
+    photon_count_base: float = 5e5  # Photons per detector element at 200mA
+    exposure_multiplier: float = 1.0  # Extra exposure gain for industrial high-power scans
     energy_bins: int = 10
     use_gpu: bool = False
+    # Scatter simulation
     enable_scatter: bool = False
+    scatter_fraction: float = 0.15
+    scatter_kernel_sigma: float = 30.0
+    # Motion blur simulation
+    enable_motion_blur: bool = False
+    motion_blur_angle: float = 1.0
     
     @property
     def photon_count(self) -> float:
         """Effective photon count scaled by tube current."""
-        return self.photon_count_base * (self.tube_current_ma / 200.0)
+        current_scale = max(float(self.tube_current_ma), 1.0) / 200.0
+        exposure_scale = max(float(self.exposure_multiplier), 0.01)
+        return self.photon_count_base * current_scale * exposure_scale
 
 
 class PhysicalCTSimulator:
@@ -87,7 +93,6 @@ class PhysicalCTSimulator:
        e. Log-transform to get projection value
     3. Reconstruct using filtered back projection
     """
-    
     def __init__(
         self,
         config: Optional[PhysicsConfig] = None,
@@ -110,55 +115,31 @@ class PhysicalCTSimulator:
             filtration_mm_al=self.config.filtration_mm_al
         )
         
-        # Attenuation database
-        self._attenuation_db = get_attenuation_database()
-        
         # Projection angles
         self.theta = np.linspace(0, 180, num_projections, endpoint=False)
-        
-        # Water attenuation for HU conversion
-        self._mu_water_effective = self._calculate_effective_mu("water")
         
         logging.info(
             f"PhysicalCTSimulator initialized: {self.config.kvp} kVp, "
             f"{self.config.filtration_mm_al} mm Al, "
             f"mean energy: {self._spectrum.mean_energy:.1f} keV"
         )
+        logging.info(
+            "Effective photon count per detector: %.3e (base=%.3e, mA=%s, gain=%.2f)",
+            self.config.photon_count,
+            self.config.photon_count_base,
+            self.config.tube_current_ma,
+            self.config.exposure_multiplier,
+        )
         
         # Initialize backend (defaults to CPU if not using GPU path)
         self._backend = get_backend(use_gpu=False)
-    
-    
-    def _calculate_effective_mu(self, material: str) -> float:
-        """
-        Calculate effective linear attenuation coefficient for a material.
-        
-        Uses the spectrum-weighted average.
-        """
-        table = self._attenuation_db.get_table(material)
-        if table is None:
-            return 0.171  # Default water at 100 keV
-        
-        # Weight by spectrum
-        total_weight = 0.0
-        weighted_mu = 0.0
-        
-        for E, phi in zip(self._spectrum.energies, self._spectrum.photons):
-            if phi > 0:
-                mu = table.get_mu(E)
-                weighted_mu += phi * mu
-                total_weight += phi
-        
-        if total_weight > 0:
-            return weighted_mu / total_weight
-        return 0.171
-    
     def simulate(
         self,
         voxel_grid: VoxelGrid,
         material: MaterialType = MaterialType.BONE_CORTICAL,
         background: MaterialType = MaterialType.AIR,
-        progress_callback: Optional[Callable[[float], None]] = None
+        progress_callback: Optional[Callable[[float], None]] = None,
+        density_scale: float = 1.0,
     ) -> "CTVolume":
         """
         Simulate CT scan with physical X-ray model.
@@ -168,9 +149,11 @@ class PhysicalCTSimulator:
             material: Material type for the object
             background: Material type for empty space
             progress_callback: Optional progress callback (0.0-1.0)
+            density_scale: Multiplicative factor for object density/attenuation.
+                Use >1.0 for compression under mass conservation.
             
         Returns:
-            CTVolume with reconstructed HU values
+            CTVolume with reconstructed absolute linear attenuation values (cm^-1)
         """
         from ..volume import CTVolume
         
@@ -179,12 +162,13 @@ class PhysicalCTSimulator:
         # Get physical materials
         phys_material = material_type_to_physical(material.value)
         phys_background = material_type_to_physical(background.value)
+        material_db = MaterialDatabase()
         
         if phys_material is None:
             logging.warning(f"No physics data for {material.value}, using bone_cortical")
-            phys_material = PHYSICAL_MATERIALS["bone_cortical"]
+            phys_material = material_db.get_material(MaterialType.BONE_CORTICAL)
         if phys_background is None:
-            phys_background = PHYSICAL_MATERIALS["air"]
+            phys_background = material_db.get_material(MaterialType.AIR)
         
         # Prepare energy bins (coarse for speed)
         energy_edges = np.linspace(
@@ -196,6 +180,10 @@ class PhysicalCTSimulator:
         
         # Pre-calculate attenuation coefficients per energy bin
         mu_object = phys_material.get_mu_array(bin_centers)
+        if not np.isfinite(density_scale) or density_scale <= 0:
+            logging.warning("Invalid density_scale=%.6g, falling back to 1.0", density_scale)
+            density_scale = 1.0
+        mu_object = mu_object * float(density_scale)
         mu_background = phys_background.get_mu_array(bin_centers)
         
         # Bin the spectrum
@@ -223,7 +211,14 @@ class PhysicalCTSimulator:
             logging.info("Using GPU for physics simulation")
             from .gpu_simulator import GPUSimulator
             
-            gpu_sim = GPUSimulator(self.theta)
+            gpu_sim = GPUSimulator(
+                theta=self.theta,
+                enable_scatter=self.config.enable_scatter,
+                scatter_fraction=self.config.scatter_fraction,
+                scatter_kernel_sigma=self.config.scatter_kernel_sigma,
+                enable_motion_blur=self.config.enable_motion_blur,
+                motion_blur_angle=self.config.motion_blur_angle
+            )
             reconstructed = gpu_sim.simulate_volume(
                 volume_data=voxel_grid.data,
                 mu_object=mu_object,
@@ -231,7 +226,7 @@ class PhysicalCTSimulator:
                 bin_weights=bin_weights,
                 bin_centers=bin_centers,
                 photon_count=self.config.photon_count,
-                mu_water_effective=self._mu_water_effective,
+                voxel_size_mm=voxel_grid.voxel_size,
                 progress_callback=progress_callback
             )
 
@@ -247,7 +242,8 @@ class PhysicalCTSimulator:
                 recon_slice, _ = self._simulate_slice(
                     slice_2d,
                     mu_object, mu_background,
-                    bin_weights, bin_centers
+                    bin_weights, bin_centers,
+                    voxel_size_mm=voxel_grid.voxel_size
                 )
                 return slice_idx, recon_slice
             
@@ -285,13 +281,14 @@ class PhysicalCTSimulator:
         mu_object: np.ndarray,
         mu_background: np.ndarray,
         bin_weights: np.ndarray,
-        bin_centers: np.ndarray
+        bin_centers: np.ndarray,
+        voxel_size_mm: float,
     ) -> np.ndarray:
         """
         Simulate CT for a single 2D slice with polychromatic physics.
         
         Output is always square based on the longer edge for consistent CT geometry.
-        Returns reconstructed HU values.
+        Returns reconstructed absolute linear attenuation values (cm^-1).
         """
         from skimage.transform import radon, iradon
         
@@ -337,11 +334,13 @@ class PhysicalCTSimulator:
             diag_pad_half = 0
         
         # Calculate path length through material using Radon transform
-        # Use CPU backend
+        # Use CPU backend. Radon outputs path length in voxel units; convert to cm.
         path_lengths = self._backend.radon(padded_slice.astype(np.float64), theta=self.theta)
-        
+        voxel_size_cm = max(float(voxel_size_mm), 1e-9) / 10.0
+        path_lengths_cm = path_lengths * voxel_size_cm
+
         # Polychromatic projection
-        max_path = path_lengths.max() * 1.1 if path_lengths.max() > 0 else 100
+        max_path = path_lengths_cm.max() * 1.1 if path_lengths_cm.max() > 0 else 10.0
         
         # Initialize transmitted intensity
         I_transmitted = np.zeros_like(path_lengths)
@@ -354,7 +353,7 @@ class PhysicalCTSimulator:
             mu_obj = mu_object[i]
             mu_bg = mu_background[i]
             
-            L_object = path_lengths
+            L_object = path_lengths_cm
             L_total = max_path
             L_bg = np.maximum(L_total - L_object, 0)
             
@@ -366,13 +365,16 @@ class PhysicalCTSimulator:
         I_counts = I_transmitted * self.config.photon_count
         I_counts = np.maximum(I_counts, 1)
         
-        # Apply Poisson noise
-        I_noisy = np.random.poisson(I_counts.astype(int)).astype(np.float64)
+        # Apply Poisson noise; switch to Gaussian approximation for very high counts.
+        if np.max(I_counts) > 1e7:
+            I_noisy = np.random.normal(I_counts, np.sqrt(I_counts)).astype(np.float64)
+        else:
+            I_noisy = np.random.poisson(I_counts.astype(np.int64)).astype(np.float64)
         I_noisy = np.maximum(I_noisy, 1)
         
         # Log transform to get projection values
-        I_ratio = I_noisy / self.config.photon_count
-        sinogram = -np.log(np.maximum(I_ratio, 1e-10))
+        I_ratio = np.clip(I_noisy / self.config.photon_count, 1e-10, 1.0)
+        sinogram = -np.log(I_ratio)
         
         # Filtered back projection
         reconstructed = self._backend.iradon(sinogram, theta=self.theta, output_size=diag_len)
@@ -384,10 +386,7 @@ class PhysicalCTSimulator:
                 diag_pad_half:diag_pad_half + output_size
             ]
         
-        # Convert to Hounsfield Units
-        hu_slice = 1000 * (reconstructed - self._mu_water_effective) / self._mu_water_effective
-        
-        return hu_slice.astype(np.float32), output_size
+        return reconstructed.astype(np.float32), output_size
     
     
     
@@ -403,6 +402,5 @@ class PhysicalCTSimulator:
             kvp=kvp,
             filtration_mm_al=self.config.filtration_mm_al
         )
-        self._mu_water_effective = self._calculate_effective_mu("water")
         logging.info(f"kVp updated to {kvp}, mean energy: {self._spectrum.mean_energy:.1f} keV")
 

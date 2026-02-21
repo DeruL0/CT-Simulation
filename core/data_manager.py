@@ -5,7 +5,6 @@ Centralized data state management for the application.
 """
 
 import logging
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
@@ -95,15 +94,30 @@ class DataManager(QObject):
         try:
             loader = STLLoader()
             loader.load(filepath)
-            self._stl_loader = loader
-            self._voxel_grid = None  # Clear voxel grid on new STL
-            self.stl_loaded.emit(loader)
-            self.voxel_grid_changed.emit(None)
+            self.set_stl_loader(loader)
             logging.info(f"Loaded STL: {filepath}")
             return True
         except Exception as e:
             logging.error(f"Failed to load STL: {e}")
             return False
+
+    def set_stl_loader(self, stl_loader: Optional[STLLoader]) -> None:
+        """
+        Set the current STL loader and reset derived data.
+
+        Args:
+            stl_loader: STLLoader instance or None to clear
+        """
+        self._stl_loader = stl_loader
+        self._voxel_grid = None
+        self._ct_volume = None
+
+        self.stl_loaded.emit(stl_loader)
+        self.voxel_grid_changed.emit(None)
+        self.ct_volume_changed.emit(None)
+
+        if stl_loader is not None:
+            logging.info("STL loader set")
     
     def set_voxel_grid(self, voxel_grid: Optional[VoxelGrid]) -> None:
         """
@@ -116,6 +130,10 @@ class DataManager(QObject):
         self.voxel_grid_changed.emit(voxel_grid)
         if voxel_grid is not None:
             logging.info(f"Voxel grid set: {voxel_grid.shape}")
+
+    def clear_voxel_grid(self) -> None:
+        """Clear the current voxel grid."""
+        self.set_voxel_grid(None)
     
     def set_ct_volume(self, ct_volume: Optional[CTVolume]) -> None:
         """
@@ -128,6 +146,10 @@ class DataManager(QObject):
         self.ct_volume_changed.emit(ct_volume)
         if ct_volume is not None:
             logging.info(f"CT volume set: {ct_volume.shape}")
+
+    def clear_ct_volume(self) -> None:
+        """Clear the current CT volume."""
+        self.set_ct_volume(None)
     
     def clear(self) -> None:
         """Clear all data."""

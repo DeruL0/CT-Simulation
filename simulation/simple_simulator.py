@@ -11,6 +11,7 @@ import numpy as np
 from .voxelizer import VoxelGrid
 from .volume import CTVolume
 from .backends import get_backend
+from .materials import MaterialType, material_type_to_physical
 
 
 class SimpleCTSimulator:
@@ -20,21 +21,6 @@ class SimpleCTSimulator:
     
     Use this for quick previews. For accurate simulation, use PhysicalCTSimulator.
     """
-    
-    # Material to approximate HU mapping
-    MATERIAL_HU_MAP = {
-        'WATER': 0,
-        'SOFT_TISSUE': 50,
-        'MUSCLE': 40,
-        'FAT': -100,
-        'BONE_CORTICAL': 1500,
-        'BONE_TRABECULAR': 400,
-        'CALCIUM': 1800,
-        'CALCIUM_ITE': 1700,
-        'CALCIUM_ITE_HIGH': 1900,
-        'CALCIUM_URIC': 500,
-        'CALCIUM_STRUVITE': 700,
-    }
     
     def __init__(self, num_projections: int = 360, use_gpu: bool = False):
         """
@@ -59,11 +45,11 @@ class SimpleCTSimulator:
         
         Args:
             voxel_grid: Binary voxel grid from voxelization
-            material: Material type for HU mapping (optional)
+            material: Material type for absolute attenuation scaling (optional)
             progress_callback: Progress callback (0.0 to 1.0)
             
         Returns:
-            CTVolume with reconstructed HU values
+            CTVolume with reconstructed absolute linear attenuation values
         """
         current_volume = voxel_grid.data.astype(np.float32)
         
@@ -82,10 +68,10 @@ class SimpleCTSimulator:
             if progress_callback:
                 progress_callback((i + 1) / num_slices)
         
-        # Convert to HU values
-        hu_volume = self._convert_to_hu(reconstructed, material)
-        
-        return CTVolume(hu_volume, voxel_grid.voxel_size, voxel_grid.origin)
+        # Convert reconstructed values to absolute linear attenuation scale (cm^-1)
+        mu_volume = self._scale_to_absolute_mu(reconstructed, material)
+
+        return CTVolume(mu_volume, voxel_grid.voxel_size, voxel_grid.origin)
     
     def _process_slice(self, slice_img: np.ndarray, theta: np.ndarray) -> np.ndarray:
         """Process a single 2D slice through Radon/iRadon."""
@@ -121,22 +107,53 @@ class SimpleCTSimulator:
         
         return recon_slice
     
-    def _convert_to_hu(self, reconstructed: np.ndarray, material) -> np.ndarray:
-        """Convert normalized values to HU scale."""
-        # Get approximate HU value for material
-        material_hu = 1000  # Default: bone-like
-        if material is not None:
-            mat_name = material.name if hasattr(material, 'name') else str(material)
-            material_hu = self.MATERIAL_HU_MAP.get(mat_name, 1000)
-        
-        # Normalize reconstructed values to 0-1 range
+    def _resolve_reference_mu(self, material) -> float:
+        """Resolve material reference linear attenuation (cm^-1)."""
+        default_mu = 0.171  # Approximate water attenuation near 100 keV.
+
+        if material is None:
+            return default_mu
+
+        if hasattr(material, "linear_attenuation"):
+            try:
+                return float(material.linear_attenuation)
+            except Exception:
+                return default_mu
+
+        if isinstance(material, MaterialType):
+            phys = material_type_to_physical(material.value)
+            if phys is not None:
+                return float(phys.linear_attenuation)
+
+        if hasattr(material, "value"):
+            phys = material_type_to_physical(str(material.value))
+            if phys is not None:
+                return float(phys.linear_attenuation)
+
+        if hasattr(material, "name"):
+            mat_name = str(material.name).lower()
+            phys = material_type_to_physical(mat_name)
+            if phys is not None:
+                return float(phys.linear_attenuation)
+
+        phys = material_type_to_physical(str(material).lower())
+        if phys is not None:
+            return float(phys.linear_attenuation)
+
+        return default_mu
+
+    def _scale_to_absolute_mu(self, reconstructed: np.ndarray, material) -> np.ndarray:
+        """Convert normalized reconstruction values to absolute attenuation (cm^-1)."""
+        material_mu = self._resolve_reference_mu(material)
+
+        # Normalize reconstructed values to 0-1 range.
         rmin, rmax = reconstructed.min(), reconstructed.max()
         if rmax > rmin:
             normalized = (reconstructed - rmin) / (rmax - rmin)
         else:
-            normalized = reconstructed
-        
-        # Map to HU: 0 -> -1000 (air), 1 -> material_hu
-        hu_volume = normalized * (material_hu + 1000) - 1000
-        
-        return hu_volume.astype(np.float32)
+            normalized = np.zeros_like(reconstructed, dtype=np.float32)
+
+        # Scale to [0, material_mu].
+        mu_volume = np.clip(normalized, 0.0, 1.0) * material_mu
+
+        return mu_volume.astype(np.float32)

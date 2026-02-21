@@ -7,25 +7,6 @@ Contains constants and default settings for the CT simulation engine.
 from dataclasses import dataclass, field
 from typing import Tuple
 
-# Import MaterialType from the canonical location
-from simulation.materials import MaterialType
-
-
-# Hounsfield Unit (HU) values for different materials
-# Reference: https://radiopaedia.org/articles/hounsfield-unit
-# Note: Full material database is in simulation.materials.MaterialDatabase
-MATERIAL_HU: dict[MaterialType, float] = {
-    MaterialType.AIR: -1000.0,
-    MaterialType.WATER: 0.0,
-    MaterialType.FAT: -100.0,
-    MaterialType.MUSCLE: 40.0,
-    MaterialType.BONE_CANCELLOUS: 400.0,
-    MaterialType.BONE_CORTICAL: 1000.0,
-    MaterialType.TITANIUM: 3000.0,
-}
-
-
-
 @dataclass
 class VoxelizationConfig:
     """Configuration for mesh voxelization."""
@@ -54,11 +35,12 @@ class DICOMConfig:
     institution_name: str = "Research Institution"
     slice_thickness_mm: float = 1.0
     
-    # Window/Level presets
+    # Window/Level presets in linear attenuation units (mu, cm^-1)
     window_presets: dict = field(default_factory=lambda: {
-        "bone": {"center": 500, "width": 2000},
-        "soft_tissue": {"center": 40, "width": 400},
-        "lung": {"center": -600, "width": 1500},
+        "low_density": {"center": 0.03, "width": 0.10},
+        "water_soft": {"center": 0.20, "width": 0.30},
+        "bone_light_metal": {"center": 0.70, "width": 1.20},
+        "dense_metal": {"center": 3.00, "width": 6.00},
     })
     
 

@@ -8,6 +8,7 @@ GPU acceleration available via CuPy.
 
 from .types import LatticeType, DefectShape, LatticeConfig, DefectConfig
 from .modifier import StructureModifier
+from .annotations import VoidAnnotation, AnnotationSet, TimeSeriesAnnotations
 
 __all__ = [
     'LatticeType',
@@ -15,4 +16,7 @@ __all__ = [
     'LatticeConfig',
     'DefectConfig',
     'StructureModifier',
+    'VoidAnnotation',
+    'AnnotationSet',
+    'TimeSeriesAnnotations',
 ]

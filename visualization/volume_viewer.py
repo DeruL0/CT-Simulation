@@ -19,13 +19,13 @@ class VolumeViewer:
     
     # View presets mapping names to camera positions
     VIEW_PRESETS = {
-        "Isometric": {"azimuth": 45, "elevation": 30},
-        "Front": {"azimuth": 0, "elevation": 0},
-        "Back": {"azimuth": 180, "elevation": 0},
-        "Left": {"azimuth": -90, "elevation": 0},
-        "Right": {"azimuth": 90, "elevation": 0},
-        "Top": {"azimuth": 0, "elevation": 90},
-        "Bottom": {"azimuth": 0, "elevation": -90},
+        "Isometric": {"vector": (1.0, 1.0, 1.0)},
+        "Front": {"vector": (0.0, -1.0, 0.0)},
+        "Back": {"vector": (0.0, 1.0, 0.0)},
+        "Left": {"vector": (-1.0, 0.0, 0.0)},
+        "Right": {"vector": (1.0, 0.0, 0.0)},
+        "Top": {"vector": (0.0, 0.0, 1.0)},
+        "Bottom": {"vector": (0.0, 0.0, -1.0)},
     }
     
     def __init__(self):
@@ -44,7 +44,8 @@ class VolumeViewer:
             mesh: Mesh object (trimesh.Trimesh or similar)
         """
         self._mesh = mesh
-        self._volume_data = None
+        if mesh is not None:
+            self._volume_data = None
     
     def set_volume(
         self, 
@@ -61,11 +62,12 @@ class VolumeViewer:
             threshold: Isosurface threshold value
         """
         self._volume_data = data
-        self._voxel_size = voxel_size
-        self._threshold = threshold
-        self._mesh = None
+        self._voxel_size = float(voxel_size)
+        self._threshold = float(threshold)
+        if data is not None:
+            self._mesh = None
     
-    def set_view(self, view_name: str) -> Dict[str, float]:
+    def set_view(self, view_name: str) -> Dict[str, Any]:
         """
         Set the camera view to a preset.
         
@@ -73,7 +75,7 @@ class VolumeViewer:
             view_name: Name of the view preset
             
         Returns:
-            Dictionary with azimuth and elevation values
+            Dictionary with view metadata
         """
         if view_name in self.VIEW_PRESETS:
             self._current_view = view_name
@@ -113,3 +115,13 @@ class VolumeViewer:
     def show_edges(self) -> bool:
         """Get whether edges should be shown."""
         return self._show_edges
+
+    @property
+    def current_view(self) -> str:
+        """Get the current named view preset."""
+        return self._current_view
+
+    def clear(self) -> None:
+        """Clear all managed visualization state."""
+        self._mesh = None
+        self._volume_data = None

@@ -25,6 +25,8 @@ try:
 except ImportError:
     trimesh = None
 
+from .volume_viewer import VolumeViewer
+
 
 class MeshViewer(QWidget):
     """3D viewer for STL meshes and CT volumes."""
@@ -32,8 +34,7 @@ class MeshViewer(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
-        self._mesh = None
-        self._ct_volume = None
+        self._viewer_state = VolumeViewer()
         self._plotter = None
         
         self._setup_ui()
@@ -143,7 +144,7 @@ class MeshViewer(QWidget):
         if not HAS_PYVISTA or self._plotter is None:
             return
         
-        self._mesh = mesh
+        self._viewer_state.set_mesh(mesh)
         
         # Clear previous actors
         self._plotter.clear()
@@ -166,7 +167,7 @@ class MeshViewer(QWidget):
         self._plotter.add_mesh(
             pv_mesh,
             color='#D0D0D0',  # Light gray
-            show_edges=self._edges_check.isChecked(),
+            show_edges=self._viewer_state.show_edges,
             edge_color='#666666',
             lighting=True,
             smooth_shading=True,
@@ -185,14 +186,14 @@ class MeshViewer(QWidget):
         Display CT volume as 3D isosurface.
         
         Args:
-            ct_data: 3D numpy array of HU values (Z, Y, X)
+            ct_data: 3D numpy array of linear attenuation values (cm^-1, Z, Y, X)
             voxel_size: Voxel edge length in mm
-            threshold: HU threshold for isosurface extraction
+            threshold: Threshold for isosurface extraction
         """
         if not HAS_PYVISTA or self._plotter is None:
             return
         
-        self._ct_volume = ct_data
+        self._viewer_state.set_volume(ct_data, voxel_size=voxel_size, threshold=threshold)
         
         # Clear previous actors
         self._plotter.clear()
@@ -238,26 +239,17 @@ class MeshViewer(QWidget):
         """Handle view preset change."""
         if self._plotter is None:
             return
-        
-        # Define view vectors as numeric arrays (x, y, z)
-        views = {
-            "Isometric": (1, 1, 1),      # Isometric view
-            "Front": (0, -1, 0),         # Looking from front (negative Y)
-            "Back": (0, 1, 0),           # Looking from back (positive Y)
-            "Left": (-1, 0, 0),          # Looking from left (negative X)
-            "Right": (1, 0, 0),          # Looking from right (positive X)
-            "Top": (0, 0, 1),            # Looking from top (positive Z)
-            "Bottom": (0, 0, -1)         # Looking from bottom (negative Z)
-        }
-        
-        if view_name in views:
-            self._plotter.view_vector(views[view_name])
-            self._plotter.reset_camera()
+
+        preset = self._viewer_state.set_view(view_name)
+        vector = preset.get("vector", (1.0, 1.0, 1.0))
+        self._plotter.view_vector(vector)
+        self._plotter.reset_camera()
     
     def _on_edges_toggled(self, state: int) -> None:
         """Handle edge visibility toggle."""
-        if self._mesh is not None:
-            self.set_mesh(self._mesh)
+        self._viewer_state.set_edges_visible(state != 0)
+        if self._viewer_state.mesh is not None:
+            self.set_mesh(self._viewer_state.mesh)
     
     def _on_reset_view(self) -> None:
         """Reset camera to default isometric view."""
@@ -270,5 +262,4 @@ class MeshViewer(QWidget):
         if self._plotter is not None:
             self._plotter.clear()
             self._plotter.add_axes()
-        self._mesh = None
-        self._ct_volume = None
+        self._viewer_state.clear()

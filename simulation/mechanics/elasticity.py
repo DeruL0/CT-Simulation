@@ -283,26 +283,24 @@ def apply_displacement_field(
         Warped volume
     """
     use_gpu = use_gpu and HAS_GPU
-    xp = cp if use_gpu else np
-    ndimage = cp_ndimage if use_gpu else sp_ndimage
     
     nz, ny, nx = volume.shape
     result = np.zeros_like(volume)
     
-    # Create coordinate grids
-    z_base = np.arange(nz, dtype=np.float32).reshape(-1, 1, 1)
-    y_base = np.arange(ny, dtype=np.float32).reshape(1, -1, 1)
-    x_base = np.arange(nx, dtype=np.float32).reshape(1, 1, -1)
-    
-    # Deformed coordinates = original coordinates - displacement
-    # (We sample the original volume at the "source" position)
-    z_coords = np.broadcast_to(z_base, volume.shape) - u_z
-    y_coords = np.broadcast_to(y_base, volume.shape) - u_y
-    x_coords = np.broadcast_to(x_base, volume.shape) - u_x
-    
     if use_gpu:
         # Tiled GPU processing
         num_chunks = (nz + chunk_size - 1) // chunk_size
+        
+        # Upload data once and keep all coordinate generation on GPU.
+        vol_gpu = cp.asarray(volume, dtype=cp.float32)
+        u_z_gpu = cp.asarray(u_z, dtype=cp.float32)
+        u_y_gpu = cp.asarray(u_y, dtype=cp.float32)
+        u_x_gpu = cp.asarray(u_x, dtype=cp.float32)
+
+        # Base lateral grids generated directly in VRAM.
+        y_axis = cp.arange(ny, dtype=cp.float32)
+        x_axis = cp.arange(nx, dtype=cp.float32)
+        y_grid, x_grid = cp.meshgrid(y_axis, x_axis, indexing='ij')
         
         for i, z_start in enumerate(range(0, nz, chunk_size)):
             z_end = min(z_start + chunk_size, nz)
@@ -310,27 +308,39 @@ def apply_displacement_field(
             if progress_callback:
                 progress_callback((i + 1) / num_chunks, f"Warping chunk {i+1}/{num_chunks}")
             
-            # Upload chunk data
-            vol_chunk = cp.asarray(volume, dtype=cp.float32)  # Need full volume for sampling
-            coords_chunk = cp.array([
-                z_coords[z_start:z_end],
-                y_coords[z_start:z_end],
-                x_coords[z_start:z_end]
-            ], dtype=cp.float32)
+            # Chunk coordinates are assembled entirely on GPU (no host copies).
+            z_axis_chunk = cp.arange(z_start, z_end, dtype=cp.float32).reshape(-1, 1, 1)
+            z_coords_chunk = z_axis_chunk - u_z_gpu[z_start:z_end]
+            y_coords_chunk = y_grid[None, :, :] - u_y_gpu[z_start:z_end]
+            x_coords_chunk = x_grid[None, :, :] - u_x_gpu[z_start:z_end]
+            coords_chunk = cp.stack(
+                (z_coords_chunk, y_coords_chunk, x_coords_chunk),
+                axis=0
+            )
             
-            # Warp using map_coordinates
+            # Warp using map_coordinates (samples from full volume)
             warped_chunk = cp_ndimage.map_coordinates(
-                vol_chunk, coords_chunk, order=1, mode='constant', cval=0.0
+                vol_gpu, coords_chunk, order=1, mode='constant', cval=0.0
             )
             
             # Download result
             result[z_start:z_end] = cp.asnumpy(warped_chunk)
             
-            # Free memory
-            del vol_chunk, coords_chunk, warped_chunk
-            cp.get_default_memory_pool().free_all_blocks()
+            # Free chunk temporaries (keep source tensors resident)
+            del z_axis_chunk, z_coords_chunk, y_coords_chunk, x_coords_chunk, coords_chunk, warped_chunk
+        
+        # Free volume after all chunks processed
+        del vol_gpu, u_z_gpu, u_y_gpu, u_x_gpu, y_axis, x_axis, y_grid, x_grid
+        cp.get_default_memory_pool().free_all_blocks()
     else:
         # CPU processing
+        z_base = np.arange(nz, dtype=np.float32).reshape(-1, 1, 1)
+        y_base = np.arange(ny, dtype=np.float32).reshape(1, -1, 1)
+        x_base = np.arange(nx, dtype=np.float32).reshape(1, 1, -1)
+
+        z_coords = np.broadcast_to(z_base, volume.shape) - u_z
+        y_coords = np.broadcast_to(y_base, volume.shape) - u_y
+        x_coords = np.broadcast_to(x_base, volume.shape) - u_x
         coords = np.array([z_coords, y_coords, x_coords])
         result = sp_ndimage.map_coordinates(
             volume.astype(np.float32), coords, order=1, mode='constant', cval=0.0

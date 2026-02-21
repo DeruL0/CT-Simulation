@@ -8,10 +8,11 @@ and DICOM export.
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Tuple
 import numpy as np
 
 from .elasticity import ElasticitySolver, ElasticityConfig, apply_displacement_field
+from ..structures.annotations import AnnotationSet, VoidAnnotation
 
 # GPU support detection
 try:
@@ -37,7 +38,6 @@ class CompressionConfig:
     solver_iterations: int = 300
     
     # GPU settings
-    use_gpu: bool = True
     warp_chunk_size: int = 64
     
     # Output settings
@@ -54,6 +54,8 @@ class CompressionResult:
     voxel_size: float = 0.5
     dicom_path: Optional[Path] = None
     cache_path: Optional[str] = None
+    annotations: Optional[AnnotationSet] = None
+    density_scale: float = 1.0
     
     def __post_init__(self):
         # Backward compatibility for positional args if needed, though dataclasses handle init
@@ -126,7 +128,8 @@ class CompressionManager:
         volume: np.ndarray,
         voxel_size: float,
         config: CompressionConfig,
-        progress_callback: Optional[Callable[[float, str], None]] = None
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        initial_annotations: Optional[AnnotationSet] = None,
     ) -> List[CompressionResult]:
         """
         Run multi-step compression simulation.
@@ -136,12 +139,16 @@ class CompressionManager:
             voxel_size: Voxel size in mm
             config: Compression configuration
             progress_callback: Optional callback(progress: 0-1, status: str)
+            initial_annotations: Optional initial void annotations to track
             
         Returns:
             List of CompressionResult for each time step
         """
         results = []
         current_volume = volume.copy()
+        
+        # Track cumulative compression for annotation transformation and density scaling.
+        cumulative_scale = np.array([1.0, 1.0, 1.0])  # (z, y, x)
         
         # Rotate volume to standardize compression axis (always compress on Z)
         axis_rotated = False
@@ -172,7 +179,9 @@ class CompressionManager:
             step_index=0,
             compression_ratio=0.0,
             _volume=initial_volume,
-            voxel_size=voxel_size
+            voxel_size=voxel_size,
+            density_scale=1.0,
+            annotations=initial_annotations,
         ))
         
         for step in range(1, config.num_steps + 1):
@@ -188,7 +197,7 @@ class CompressionManager:
             
             # Apply compression (always on Z axis now)
             if config.use_physics:
-                deformed = self._apply_physical_compression(
+                deformed, disp_fields = self._apply_physical_compression(
                     current_volume, incremental_ratio, config, 
                     lambda p, s: progress_callback(
                         ((step - 1) + p) / config.num_steps, s
@@ -198,8 +207,26 @@ class CompressionManager:
                 deformed = self._apply_affine_compression(
                     current_volume, incremental_ratio, config.poisson_ratio, voxel_size
                 )
+                disp_fields = None
             
             current_volume = deformed
+
+            # Compute cumulative affine deformation scale for this time step.
+            inc_scale_z = 1.0 - incremental_ratio
+            inc_scale_xy = 1.0 + config.poisson_ratio * incremental_ratio
+            cumulative_scale *= np.array([inc_scale_z, inc_scale_xy, inc_scale_xy])
+            
+            # --- Transform annotations for this step ---
+            step_annotations = None
+            if initial_annotations is not None:
+                step_annotations = self._transform_annotations(
+                    initial_annotations, step, step_ratio,
+                    cumulative_scale, voxel_size,
+                    current_volume.shape, original_axis,
+                    disp_fields,
+                )
+
+            density_scale = self._mass_conserving_density_scale(cumulative_scale)
             
             # Un-rotate for storage
             store_volume = current_volume.copy()
@@ -214,7 +241,9 @@ class CompressionManager:
                 step_index=step,
                 compression_ratio=step_ratio,
                 _volume=store_volume,
-                voxel_size=voxel_size
+                voxel_size=voxel_size,
+                density_scale=density_scale,
+                annotations=step_annotations,
             )
             results.append(result)
             
@@ -228,6 +257,65 @@ class CompressionManager:
             progress_callback(1.0, "Simulation complete")
         
         return results
+
+    @staticmethod
+    def _mass_conserving_density_scale(scale_factors: np.ndarray) -> float:
+        """Compute density multiplier from affine volume scaling (rho' = rho / det(S))."""
+        volume_scale = float(np.prod(np.abs(np.asarray(scale_factors, dtype=np.float64))))
+        return 1.0 / max(volume_scale, 1e-12)
+
+    def _transform_annotations(
+        self,
+        initial_annotations: AnnotationSet,
+        step_index: int,
+        compression_ratio: float,
+        cumulative_scale: np.ndarray,
+        voxel_size: float,
+        volume_shape: Tuple[int, int, int],
+        axis: str,
+        disp_fields: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+    ) -> AnnotationSet:
+        """Transform annotations for a compression step.
+
+        Uses displacement fields (physical mode) or affine scaling (geometric mode)
+        to update void center positions and radii.
+        """
+        new_voids = []
+        origin = initial_annotations.origin.copy()
+
+        # Map axis name to scale index ordering
+        # The internal compression always happens on Z axis (index 0)
+        # cumulative_scale is (z, y, x) in the *rotated* frame
+        # Annotations are in world coords, so remap scale based on original axis
+        if axis == 'X':
+            scale_world = np.array([cumulative_scale[1], cumulative_scale[2], cumulative_scale[0]])  # z,y,x -> z,y,x_world
+        elif axis == 'Y':
+            scale_world = np.array([cumulative_scale[1], cumulative_scale[0], cumulative_scale[2]])
+        else:  # Z
+            scale_world = cumulative_scale.copy()
+
+        # Volume center for scaling reference
+        vol_center = origin + np.array(volume_shape) * voxel_size * 0.5
+
+        for v in initial_annotations.voids:
+            # Scale center relative to volume center
+            rel = v.center_mm - vol_center
+            new_center = vol_center + rel * scale_world
+
+            new_void = v.transformed(new_center, scale_world)
+            new_voids.append(new_void)
+
+        ann_set = AnnotationSet(
+            step_index=step_index,
+            compression_ratio=compression_ratio,
+            voxel_size=voxel_size,
+            volume_shape=volume_shape,
+            origin=origin,
+            voids=new_voids,
+        )
+        ann_set.recompute_bboxes()
+        logging.info(f"  Annotations transformed for step {step_index}: {len(new_voids)} voids")
+        return ann_set
     
     def _apply_physical_compression(
         self,
@@ -235,8 +323,12 @@ class CompressionManager:
         compression_ratio: float,
         config: CompressionConfig,
         progress_callback: Optional[Callable[[float, str], None]] = None
-    ) -> np.ndarray:
-        """Apply physical compression using elasticity solver."""
+    ) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Apply physical compression using elasticity solver.
+
+        Returns:
+            Tuple of (warped volume, (u_z, u_y, u_x) displacement fields)
+        """
         
         if self._solver is None:
             self._solver = ElasticitySolver(use_gpu=self.use_gpu)
@@ -262,7 +354,7 @@ class CompressionManager:
             progress_callback=progress_callback
         )
         
-        return warped
+        return warped, (u_z, u_y, u_x)
     
     def _apply_affine_compression(
         self,

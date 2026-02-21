@@ -165,7 +165,7 @@ class ParamsPanel(QWidget):
         # Tube current (mA)
         ma_row = QHBoxLayout()
         self._ma_spin = create_spinbox(
-            200, 1, 2000, step=50, suffix=" mA",
+            500, 1, 10000, step=50, suffix=" mA",
             tooltip="Higher current = more photons = less noise",
             callback=self._on_param_changed
         )
@@ -256,8 +256,11 @@ class ParamsPanel(QWidget):
         
         # kVp selection (extended range)
         self._kvp_physics_combo = QComboBox()
-        self._kvp_physics_combo.addItems(["40", "60", "80", "100", "120", "140", "160", "180", "200", "250", "300"])
-        self._kvp_physics_combo.setCurrentText("120")
+        self._kvp_physics_combo.addItems([
+            "40", "60", "80", "100", "120", "140", "160", "180", "200",
+            "250", "300", "350", "400", "450"
+        ])
+        self._kvp_physics_combo.setCurrentText("200")
         self._kvp_physics_combo.currentTextChanged.connect(self._on_param_changed)
         physics_params_layout.addRow("Tube Voltage:", self._kvp_physics_combo)
         
@@ -274,6 +277,15 @@ class ParamsPanel(QWidget):
             callback=self._on_param_changed
         )
         physics_params_layout.addRow("Energy Bins:", self._energy_bins_spin)
+
+        # Exposure gain multiplier for high-attenuation industrial scans
+        self._exposure_gain_spin = create_spinbox(
+            4.0, 0.1, 100.0, step=0.1, decimals=1,
+            tooltip="Scales detector photon count after tube current. "
+                    "Use >1.0 for dense metals or thick parts.",
+            callback=self._on_param_changed
+        )
+        physics_params_layout.addRow("Exposure Gain:", self._exposure_gain_spin)
         
         self._physics_params_widget.setVisible(False)
         physics_layout.addWidget(self._physics_params_widget)
@@ -465,6 +477,11 @@ class ParamsPanel(QWidget):
     def physics_tube_current(self) -> int:
         """Get tube current in mA (used by physics mode)."""
         return self._ma_spin.value()
+
+    @property
+    def physics_exposure_multiplier(self) -> float:
+        """Get exposure gain multiplier for physics mode."""
+        return self._exposure_gain_spin.value()
     
     @property
     def tube_current(self) -> int:

@@ -7,6 +7,7 @@ The main application window for CT Simulation Software.
 import logging
 from pathlib import Path
 from typing import Optional
+import numpy as np
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -38,9 +39,8 @@ class MainWindow(QMainWindow):
         from core.data_manager import DataManager
         self._data_manager = DataManager(self)
         
-        self._stl_loader: Optional[STLLoader] = None
-        self._ct_volume: Optional[CTVolume] = None
         self._compression_results: Optional[list] = None  # Store list of CompressionResult
+        self._initial_annotations = None  # Store initial AnnotationSet for export
         self._worker: Optional[QThread] = None
         self._progress_dialog: Optional[QProgressDialog] = None
         
@@ -224,10 +224,31 @@ class MainWindow(QMainWindow):
     def _show_error(self, title: str, message: str) -> None:
         """Display an error message and restore UI state."""
         self._close_progress_dialog()
-        self._simulate_btn.setEnabled(self._stl_loader is not None)
-        self._export_btn.setEnabled(self._ct_volume is not None)
+        self._simulate_btn.setEnabled(self._data_manager.has_stl)
+        self._export_btn.setEnabled(self._data_manager.has_ct_volume)
         self._status_bar.showMessage(f"Error: {message}")
         QMessageBox.critical(self, title, f"An error occurred:\n\n{message}")
+
+    @staticmethod
+    def _auto_isosurface_threshold(volume_data: np.ndarray) -> float:
+        """Compute a robust default isosurface threshold from attenuation data."""
+        finite = volume_data[np.isfinite(volume_data)]
+        if finite.size == 0:
+            return 0.0
+
+        if finite.size > 2_000_000:
+            step = max(1, finite.size // 2_000_000)
+            finite = finite[::step]
+
+        vmin = float(np.min(finite))
+        vmax = float(np.max(finite))
+        if vmax <= vmin:
+            return vmin
+
+        q10 = float(np.percentile(finite, 10.0))
+        q90 = float(np.percentile(finite, 90.0))
+        threshold = q10 + 0.25 * (q90 - q10)
+        return max(threshold, vmin + 1e-4)
     
     def _on_clear_cache(self) -> None:
         """Handle File > Clear Mesh Cache."""
@@ -254,13 +275,11 @@ class MainWindow(QMainWindow):
     
     def _on_stl_loaded(self, loader: STLLoader) -> None:
         """Handle STL file loaded."""
-        self._stl_loader = loader
+        self._data_manager.set_stl_loader(loader)
         self._simulate_btn.setEnabled(True)
         self._reset_stl_btn.setEnabled(True)
-        
-        # Update DataManager for StructurePanel
-        self._data_manager._stl_loader = loader
-        self._data_manager.stl_loaded.emit(loader)
+        self._compression_results = None
+        self._initial_annotations = None
         
         # Display mesh in 3D viewer
         if loader.mesh is not None:
@@ -278,22 +297,24 @@ class MainWindow(QMainWindow):
     def _on_mesh_scaled(self, scale_factor: float) -> None:
         """Handle mesh scaling."""
         # Reset data when scaled to avoid stale caches
-        self._ct_volume = None
+        self._data_manager.clear_ct_volume()
         self._compression_results = None
+        self._initial_annotations = None
         self._data_manager.clear_voxel_grid()
         self._compression_panel.clear_results()
         if hasattr(self, '_structure_panel'):
             self._structure_panel.reset_structure()
         
         # Reset viewers
-        if self._stl_loader and self._stl_loader.mesh:
-            self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
+        stl_loader = self._data_manager.stl_loader
+        if stl_loader and stl_loader.mesh:
+            self._viewer_3d_panel.set_mesh(stl_loader.mesh)
         
         # Update memory estimate with new dimensions
-        if self._stl_loader.info:
+        if stl_loader is not None and stl_loader.info:
              self._params_panel.update_memory_estimate(
-                 tuple(self._stl_loader.info.dimensions),
-                 self._stl_loader.info.num_faces
+                 tuple(stl_loader.info.dimensions),
+                 stl_loader.info.num_faces
              )
         
         self._status_bar.showMessage(f"Model scaled by {scale_factor:.2f}×. Data reset.")
@@ -301,12 +322,14 @@ class MainWindow(QMainWindow):
     
     def _on_params_changed(self) -> None:
         """Handle parameter changes - update memory estimate."""
-        if self._stl_loader is not None and self._stl_loader.info is not None:
-            self._params_panel.update_memory_estimate(tuple(self._stl_loader.info.dimensions), self._stl_loader.info.num_faces)
+        stl_info = self._data_manager.stl_info
+        if stl_info is not None:
+            self._params_panel.update_memory_estimate(tuple(stl_info.dimensions), stl_info.num_faces)
     
     def _on_simulate(self) -> None:
         """Run CT simulation."""
-        if self._stl_loader is None or self._stl_loader.mesh is None:
+        stl_loader = self._data_manager.stl_loader
+        if stl_loader is None or stl_loader.mesh is None:
             return
         
         # Check if a worker is already running
@@ -328,7 +351,7 @@ class MainWindow(QMainWindow):
         
         # Create worker
         self._worker = SimulationWorker(
-            mesh=self._stl_loader.mesh,
+            mesh=stl_loader.mesh,
             voxel_size=self._params_panel.voxel_size,
             fill_interior=self._params_panel.fill_interior,
             num_projections=self._params_panel.num_projections,
@@ -343,6 +366,7 @@ class MainWindow(QMainWindow):
             physics_tube_current=self._params_panel.physics_tube_current,
             physics_filtration=self._params_panel.physics_filtration,
             physics_energy_bins=self._params_panel.physics_energy_bins,
+            physics_exposure_multiplier=self._params_panel.physics_exposure_multiplier,
             voxel_grid=self._data_manager.voxel_grid,  # Use pre-computed if available
             structure_config=self._structure_panel.get_active_config(), # Pass active structure config
             compression_config=self._compression_panel.get_config() if self._compression_panel.is_enabled() else None
@@ -359,11 +383,11 @@ class MainWindow(QMainWindow):
         if self._progress_dialog:
             self._progress_dialog.setValue(int(progress * 100))
     
-    @Slot(object, dict, list)
-    def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list) -> None:
+    @Slot(object, dict, list, object)
+    def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list, annotations=None) -> None:
         """Handle simulation completed."""
-        self._ct_volume = ct_volume
         self._compression_results = compression_results
+        self._initial_annotations = annotations  # Store for export
         
         self._close_progress_dialog()
         
@@ -381,10 +405,18 @@ class MainWindow(QMainWindow):
             
             # Display final step in 3D
             final_result = compression_results[-1]
+            self._data_manager.set_ct_volume(
+                CTVolume(
+                    data=final_result.volume,
+                    voxel_size=final_result.voxel_size,
+                    origin=ct_volume.origin.copy(),
+                )
+            )
+            threshold = self._auto_isosurface_threshold(final_result.volume)
             self._viewer_3d_panel.set_ct_volume(
                 final_result.volume,
                 final_result.voxel_size,
-                threshold=0.0
+                threshold=threshold
             )
             
             self._status_bar.showMessage(
@@ -392,11 +424,12 @@ class MainWindow(QMainWindow):
             )
         else:
             # No compression - display single volume
+            self._data_manager.set_ct_volume(ct_volume)
             self._viewer_panel.set_volume(ct_volume.data)
             self._compression_panel.clear_results()
             
             # Update 3D view with CT isosurface
-            threshold = 0.0  # Use water level as default threshold
+            threshold = self._auto_isosurface_threshold(ct_volume.data)
             self._viewer_3d_panel.set_ct_volume(
                 ct_volume.data, 
                 ct_volume.voxel_size, 
@@ -463,7 +496,8 @@ class MainWindow(QMainWindow):
     
     def _on_export(self) -> None:
         """Export CT volume to DICOM."""
-        if self._ct_volume is None:
+        has_series = bool(self._compression_results and len(self._compression_results) > 1)
+        if not has_series and not self._data_manager.has_ct_volume:
             QMessageBox.warning(
                 self,
                 "No Data",
@@ -502,13 +536,14 @@ class MainWindow(QMainWindow):
         if self._compression_results and len(self._compression_results) > 1:
             data_to_export = self._compression_results
         else:
-            data_to_export = self._ct_volume
+            data_to_export = self._data_manager.ct_volume
 
         self._worker = ExportWorker(
             volume_or_list=data_to_export,
             output_dir=output_dir,
             window_center=self._viewer_panel.window_center,
-            window_width=self._viewer_panel.window_width
+            window_width=self._viewer_panel.window_width,
+            initial_annotations=self._initial_annotations,
         )
         
         self._worker.progress.connect(self._on_export_progress)
@@ -547,8 +582,9 @@ class MainWindow(QMainWindow):
 
     def _on_reset_stl(self) -> None:
         """Reset 3D view to show STL mesh and reset structure."""
-        if self._stl_loader is not None and self._stl_loader.mesh is not None:
-            self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
+        stl_loader = self._data_manager.stl_loader
+        if stl_loader is not None and stl_loader.mesh is not None:
+            self._viewer_3d_panel.set_mesh(stl_loader.mesh)
             
             # Reset structure generation panel as well
             if hasattr(self, '_structure_panel'):
@@ -582,7 +618,16 @@ class MainWindow(QMainWindow):
         
         # Update 3D viewer with the selected step's volume
         voxel_size = self._data_manager.voxel_grid.voxel_size if self._data_manager.has_voxel_grid else 0.5
-        threshold = 0.5
+        current_ct = self._data_manager.ct_volume
+        origin = current_ct.origin.copy() if current_ct is not None else np.zeros(3, dtype=np.float32)
+        self._data_manager.set_ct_volume(
+            CTVolume(
+                data=volume_data,
+                voxel_size=voxel_size,
+                origin=origin,
+            )
+        )
+        threshold = self._auto_isosurface_threshold(volume_data)
         
         self._viewer_3d_panel.set_ct_volume(
             volume_data,

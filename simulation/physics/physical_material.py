@@ -3,6 +3,7 @@ Physical Material Definitions
 
 NOTE: This module is deprecated. All functionality has been merged into
 simulation.materials. This file re-exports for backward compatibility.
+`PHYSICAL_MATERIALS` is a dynamic registry view (not a copied dict snapshot).
 """
 
 from ..materials import (

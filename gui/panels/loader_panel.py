@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 
 from loaders import MeshLoader, MeshInfo, SUPPORTED_EXTENSIONS
-from simulation.materials import MaterialType
+from simulation.materials import MaterialType, MaterialDatabase
 from ..utils import create_spinbox
 
 
@@ -33,6 +33,7 @@ class LoaderPanel(QWidget):
         super().__init__(parent)
         
         self._loader: Optional[MeshLoader] = None
+        self._material_db = MaterialDatabase()
         self._setup_ui()
     
     def _setup_ui(self) -> None:
@@ -121,8 +122,9 @@ class LoaderPanel(QWidget):
         self._material_combo = QComboBox()
         for mat_type in MaterialType:
             if mat_type != MaterialType.CUSTOM:
-                # Convert enum name to display name
-                display_name = mat_type.value.replace("_", " ").title()
+                material = self._material_db.get_material(mat_type)
+                density_text = f"{material.density:.6f}" if material.density < 0.01 else f"{material.density:.3f}"
+                display_name = f"{material.name} ({density_text} g/cm^3)"
                 self._material_combo.addItem(display_name, mat_type)
         
         # Set default to cortical bone

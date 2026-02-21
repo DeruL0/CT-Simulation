@@ -9,14 +9,14 @@ from typing import Optional
 import numpy as np
 
 
-# Window presets for CT viewing
+# Window presets for attenuation-value viewing.
 WINDOW_PRESETS = {
-    "Bone": {"center": 500, "width": 2000},
-    "Soft Tissue": {"center": 40, "width": 400},
-    "Lung": {"center": -600, "width": 1500},
-    "Brain": {"center": 40, "width": 80},
-    "Liver": {"center": 60, "width": 160},
-    "Custom": {"center": 0, "width": 1000},
+    "Low Density": {"center": 0.03, "width": 0.10},
+    "Water / Soft": {"center": 0.20, "width": 0.30},
+    "Bone / Light Metal": {"center": 0.70, "width": 1.20},
+    "Dense Metal": {"center": 3.00, "width": 6.00},
+    "High-Z Metal": {"center": 40.00, "width": 100.00},
+    "Custom": {"center": 0.20, "width": 0.40},
 }
 
 
@@ -31,8 +31,8 @@ class SliceViewer:
     def __init__(self):
         self._volume: Optional[np.ndarray] = None
         self._current_slice: int = 0
-        self._window_center: float = 40.0
-        self._window_width: float = 400.0
+        self._window_center: float = 0.20
+        self._window_width: float = 0.40
     
     def set_volume(self, volume: np.ndarray) -> None:
         """
@@ -52,8 +52,8 @@ class SliceViewer:
     
     def set_window(self, center: float, width: float) -> None:
         """Set window center and width for display."""
-        self._window_center = center
-        self._window_width = max(1.0, width)
+        self._window_center = float(center)
+        self._window_width = max(1e-6, float(width))
     
     def get_windowed_slice(self) -> Optional[np.ndarray]:
         """

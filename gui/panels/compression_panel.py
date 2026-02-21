@@ -11,7 +11,7 @@ from typing import Optional, List
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QSpinBox, QDoubleSpinBox, QComboBox,
-    QPushButton, QCheckBox, QProgressBar, QFileDialog,
+    QPushButton, QProgressBar, QFileDialog,
     QLineEdit, QGroupBox, QSlider, QFrame
 )
 from PySide6.QtCore import Qt, Signal
@@ -115,10 +115,6 @@ class CompressionPanel(QWidget):
         )
         params_layout.addRow("Iterations:", self._iterations_spin)
         
-        self._gpu_check = QCheckBox("Use GPU")
-        self._gpu_check.setChecked(True)
-        params_layout.addRow("", self._gpu_check)
-        
         main_layout.addWidget(params_group)
         
         # === Results Viewer Section (hidden until results) ===
@@ -184,7 +180,6 @@ class CompressionPanel(QWidget):
             'poisson_ratio': self._poisson_spin.value(),
             'downsample_factor': self._downsample_spin.value(),
             'solver_iterations': self._iterations_spin.value(),
-            'use_gpu': self._gpu_check.isChecked(),
         }
     
     def set_results(self, results: list):

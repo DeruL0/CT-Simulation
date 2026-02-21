@@ -28,9 +28,16 @@ class DICOMExporter:
     """
     Exports CT volumes as DICOM series.
     
-    Creates a series of DICOM files, one per slice, with proper
-    metadata for scientific and clinical compatibility.
+    Creates a series of DICOM files, one per slice.
+
+    Pixel encoding modes:
+    - `mu_scaled_u16` (default): map mu(cm^-1) to unitless uint16 gray [0, 65535]
+    - `hu_u16`: convert mu to HU and store HU+1024 in uint16
     """
+
+    # Reference water attenuation used for HU conversion:
+    # HU = 1000 * (mu / mu_water_ref - 1)
+    MU_WATER_REF_CM_INV = 0.171
     
     def __init__(
         self,
@@ -39,7 +46,8 @@ class DICOMExporter:
         study_description: str = "CT Simulation",
         series_description: str = "Simulated CT Series",
         institution_name: str = "Research Institution",
-        manufacturer: str = "CT Simulation Software"
+        manufacturer: str = "CT Simulation Software",
+        pixel_value_mode: str = "mu_scaled_u16",
     ):
         """
         Initialize DICOM exporter with metadata.
@@ -51,6 +59,7 @@ class DICOMExporter:
             series_description: Description of the series
             institution_name: Name of institution
             manufacturer: Equipment manufacturer
+            pixel_value_mode: `mu_scaled_u16` or `hu_u16`
         """
         if not HAS_PYDICOM:
             raise ImportError(
@@ -64,6 +73,9 @@ class DICOMExporter:
         self.series_description = series_description
         self.institution_name = institution_name
         self.manufacturer = manufacturer
+        if pixel_value_mode not in ("mu_scaled_u16", "hu_u16"):
+            raise ValueError("pixel_value_mode must be 'mu_scaled_u16' or 'hu_u16'")
+        self.pixel_value_mode = pixel_value_mode
         
         # Generate unique identifiers for the series
         self.study_instance_uid = generate_uid()
@@ -76,13 +88,23 @@ class DICOMExporter:
         self.study_time = now.strftime("%H%M%S.%f")
         self.series_date = self.study_date
         self.series_time = self.study_time
+
+    @staticmethod
+    def _format_ds(value: float) -> str:
+        """Format a float into DICOM DS-compatible text length."""
+        return f"{float(value):.10g}"
+
+    @classmethod
+    def _mu_to_hu(cls, mu_value):
+        """Convert linear attenuation (cm^-1) to Hounsfield Units."""
+        return 1000.0 * (np.asarray(mu_value, dtype=np.float64) / cls.MU_WATER_REF_CM_INV - 1.0)
     
     def export(
         self,
         ct_volume: "CTVolume",
         output_dir: str | Path,
-        window_center: float = 40.0,
-        window_width: float = 400.0,
+        window_center: float = 0.2,
+        window_width: float = 0.4,
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> list[Path]:
         """
@@ -91,8 +113,8 @@ class DICOMExporter:
         Args:
             ct_volume: CTVolume object to export
             output_dir: Directory to save DICOM files
-            window_center: Default window center in HU
-            window_width: Default window width in HU
+            window_center: Viewer window center in linear attenuation (cm^-1)
+            window_width: Viewer window width in linear attenuation (cm^-1)
             progress_callback: Optional callback(progress: 0.0-1.0)
             
         Returns:
@@ -107,20 +129,62 @@ class DICOMExporter:
         rows, cols = volume.shape[1], volume.shape[2]
         voxel_size = ct_volume.voxel_size
         origin = ct_volume.origin
-        
-        # Rescale parameters for HU -> stored values
-        # DICOM stores as: Stored Value = (HU - Intercept) / Slope
-        rescale_slope = 1.0
-        rescale_intercept = -1024.0  # Standard CT offset
+
+        volume = np.asarray(volume, dtype=np.float64)
+
+        if self.pixel_value_mode == "hu_u16":
+            # Convert internal attenuation to HU (stored as HU + 1024).
+            export_values = self._mu_to_hu(volume)
+            rescale_slope = 1.0
+            rescale_intercept = -1024.0
+            rescale_type = "HU"
+            window_center_export = float(self._mu_to_hu(window_center))
+            window_width_export = max(1.0, float(1000.0 * window_width / self.MU_WATER_REF_CM_INV))
+            if np.isnan(window_center_export):
+                window_center_export = 0.5 * float(np.min(export_values) + np.max(export_values))
+            if window_width <= 0:
+                window_width_export = max(float(np.max(export_values) - np.min(export_values)), 1.0)
+            window_explanation = "CT HU"
+            value_min = None
+            value_scale = None
+        else:
+            # Default: scale mu directly into unitless uint16 grayscale [0, 65535].
+            export_values = volume
+            mu_min = float(np.min(export_values))
+            mu_max = float(np.max(export_values))
+            if mu_max > mu_min:
+                value_scale = 65535.0 / (mu_max - mu_min)
+            else:
+                value_scale = 0.0
+            value_min = mu_min
+
+            rescale_slope = 1.0
+            rescale_intercept = 0.0
+            rescale_type = "US"
+
+            if value_scale > 0.0:
+                window_center_export = (float(window_center) - mu_min) * value_scale
+                window_width_export = max(1.0, float(window_width) * value_scale)
+            else:
+                window_center_export = 32768.0
+                window_width_export = 65535.0
+            window_center_export = float(np.clip(window_center_export, 0.0, 65535.0))
+            window_width_export = float(np.clip(window_width_export, 1.0, 65535.0))
+            window_explanation = "Scaled Gray 0-65535"
         
         created_files = []
         
         for i in range(num_slices):
-            # Get slice data
-            slice_data = volume[i, :, :]
-            
-            # Convert HU to stored pixel values
-            stored_values = ((slice_data - rescale_intercept) / rescale_slope)
+            slice_values = export_values[i, :, :]
+
+            # Convert export values to stored uint16.
+            if self.pixel_value_mode == "hu_u16":
+                stored_values = ((slice_values - rescale_intercept) / rescale_slope)
+            else:
+                if value_scale > 0.0:
+                    stored_values = (slice_values - value_min) * value_scale
+                else:
+                    stored_values = np.zeros_like(slice_values, dtype=np.float64)
             stored_values = np.clip(stored_values, 0, 65535).astype(np.uint16)
             
             # Create DICOM dataset
@@ -131,10 +195,12 @@ class DICOMExporter:
                 cols=cols,
                 voxel_size=voxel_size,
                 origin=origin,
-                window_center=window_center,
-                window_width=window_width,
+                window_center=window_center_export,
+                window_width=window_width_export,
                 rescale_slope=rescale_slope,
-                rescale_intercept=rescale_intercept
+                rescale_intercept=rescale_intercept,
+                rescale_type=rescale_type,
+                window_explanation=window_explanation,
             )
             
             # Set pixel data
@@ -162,7 +228,9 @@ class DICOMExporter:
         window_center: float,
         window_width: float,
         rescale_slope: float,
-        rescale_intercept: float
+        rescale_intercept: float,
+        rescale_type: str,
+        window_explanation: str,
     ) -> FileDataset:
         """Create a DICOM dataset for a single slice."""
         
@@ -255,15 +323,15 @@ class DICOMExporter:
         ds.SOPClassUID = CTImageStorage
         ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
         
-        # Rescale for Hounsfield Units
-        ds.RescaleSlope = str(rescale_slope)
-        ds.RescaleIntercept = str(rescale_intercept)
-        ds.RescaleType = "HU"
+        # Rescale metadata.
+        ds.RescaleSlope = self._format_ds(rescale_slope)
+        ds.RescaleIntercept = self._format_ds(rescale_intercept)
+        ds.RescaleType = rescale_type
         
         # Window settings
-        ds.WindowCenter = str(window_center)
-        ds.WindowWidth = str(window_width)
-        ds.WindowCenterWidthExplanation = "Soft Tissue"
+        ds.WindowCenter = self._format_ds(window_center)
+        ds.WindowWidth = self._format_ds(window_width)
+        ds.WindowCenterWidthExplanation = window_explanation
         
         # Additional recommended tags
         ds.ContentDate = self.study_date
@@ -272,7 +340,10 @@ class DICOMExporter:
         ds.InstanceCreationTime = self.study_time
         
         # Image comments
-        ds.ImageComments = f"Simulated CT slice {slice_index + 1} of {num_slices}"
+        ds.ImageComments = (
+            f"Simulated CT slice {slice_index + 1} of {num_slices}; "
+            f"pixel_mode={self.pixel_value_mode}"
+        )
         
         return ds
     
