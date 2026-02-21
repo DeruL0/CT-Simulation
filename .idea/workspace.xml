@@ -5,33 +5,14 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="da894b2b-fb82-4f2f-91f7-0dafbbfe7bd3" name="更改" comment="first commit">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/data_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/data_manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/exporters/dicom.py" beforeDir="false" afterPath="$PROJECT_DIR$/exporters/dicom.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/main_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/panels/compression_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/compression_panel.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/panels/loader_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/loader_panel.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/panels/params_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/params_panel.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui/panels/viewer_panel.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/panels/viewer_panel.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/workers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/backends/gpu_backend.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/backends/gpu_backend.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/backends/radon_kernels.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/backends/radon_kernels.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/materials.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/materials.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/mechanics/elasticity.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/mechanics/elasticity.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/mechanics/manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/mechanics/manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/physics/attenuation.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/attenuation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/python_project_code.txt" beforeDir="false" afterPath="$PROJECT_DIR$/python_project_code.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/simulation/physics/gpu_simulator.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/gpu_simulator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/physics/physical_material.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/physical_material.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/simulation/physics/physical_simulator.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/physical_simulator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/physics/spectrum.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/physics/spectrum.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/simulation/simple_simulator.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/simple_simulator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/structures/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/structures/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simulation/structures/modifier.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/structures/modifier.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/simulation/volume.py" beforeDir="false" afterPath="$PROJECT_DIR$/simulation/volume.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/visualization/mesh_viewer.py" beforeDir="false" afterPath="$PROJECT_DIR$/visualization/mesh_viewer.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/visualization/slice_viewer.py" beforeDir="false" afterPath="$PROJECT_DIR$/visualization/slice_viewer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/visualization/volume_viewer.py" beforeDir="false" afterPath="$PROJECT_DIR$/visualization/volume_viewer.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

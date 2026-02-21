@@ -255,7 +255,6 @@ Centralized data state management for the application.
 """
 
 import logging
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
@@ -345,15 +344,30 @@ class DataManager(QObject):
         try:
             loader = STLLoader()
             loader.load(filepath)
-            self._stl_loader = loader
-            self._voxel_grid = None  # Clear voxel grid on new STL
-            self.stl_loaded.emit(loader)
-            self.voxel_grid_changed.emit(None)
+            self.set_stl_loader(loader)
             logging.info(f"Loaded STL: {filepath}")
             return True
         except Exception as e:
             logging.error(f"Failed to load STL: {e}")
             return False
+
+    def set_stl_loader(self, stl_loader: Optional[STLLoader]) -> None:
+        """
+        Set the current STL loader and reset derived data.
+
+        Args:
+            stl_loader: STLLoader instance or None to clear
+        """
+        self._stl_loader = stl_loader
+        self._voxel_grid = None
+        self._ct_volume = None
+
+        self.stl_loaded.emit(stl_loader)
+        self.voxel_grid_changed.emit(None)
+        self.ct_volume_changed.emit(None)
+
+        if stl_loader is not None:
+            logging.info("STL loader set")
     
     def set_voxel_grid(self, voxel_grid: Optional[VoxelGrid]) -> None:
         """
@@ -366,6 +380,10 @@ class DataManager(QObject):
         self.voxel_grid_changed.emit(voxel_grid)
         if voxel_grid is not None:
             logging.info(f"Voxel grid set: {voxel_grid.shape}")
+
+    def clear_voxel_grid(self) -> None:
+        """Clear the current voxel grid."""
+        self.set_voxel_grid(None)
     
     def set_ct_volume(self, ct_volume: Optional[CTVolume]) -> None:
         """
@@ -378,6 +396,10 @@ class DataManager(QObject):
         self.ct_volume_changed.emit(ct_volume)
         if ct_volume is not None:
             logging.info(f"CT volume set: {ct_volume.shape}")
+
+    def clear_ct_volume(self) -> None:
+        """Clear the current CT volume."""
+        self.set_ct_volume(None)
     
     def clear(self) -> None:
         """Clear all data."""
@@ -832,8 +854,6 @@ class MainWindow(QMainWindow):
         from core.data_manager import DataManager
         self._data_manager = DataManager(self)
         
-        self._stl_loader: Optional[STLLoader] = None
-        self._ct_volume: Optional[CTVolume] = None
         self._compression_results: Optional[list] = None  # Store list of CompressionResult
         self._initial_annotations = None  # Store initial AnnotationSet for export
         self._worker: Optional[QThread] = None
@@ -1019,8 +1039,8 @@ class MainWindow(QMainWindow):
     def _show_error(self, title: str, message: str) -> None:
         """Display an error message and restore UI state."""
         self._close_progress_dialog()
-        self._simulate_btn.setEnabled(self._stl_loader is not None)
-        self._export_btn.setEnabled(self._ct_volume is not None)
+        self._simulate_btn.setEnabled(self._data_manager.has_stl)
+        self._export_btn.setEnabled(self._data_manager.has_ct_volume)
         self._status_bar.showMessage(f"Error: {message}")
         QMessageBox.critical(self, title, f"An error occurred:\n\n{message}")
 
@@ -1070,13 +1090,11 @@ class MainWindow(QMainWindow):
     
     def _on_stl_loaded(self, loader: STLLoader) -> None:
         """Handle STL file loaded."""
-        self._stl_loader = loader
+        self._data_manager.set_stl_loader(loader)
         self._simulate_btn.setEnabled(True)
         self._reset_stl_btn.setEnabled(True)
-        
-        # Update DataManager for StructurePanel
-        self._data_manager._stl_loader = loader
-        self._data_manager.stl_loaded.emit(loader)
+        self._compression_results = None
+        self._initial_annotations = None
         
         # Display mesh in 3D viewer
         if loader.mesh is not None:
@@ -1094,22 +1112,24 @@ class MainWindow(QMainWindow):
     def _on_mesh_scaled(self, scale_factor: float) -> None:
         """Handle mesh scaling."""
         # Reset data when scaled to avoid stale caches
-        self._ct_volume = None
+        self._data_manager.clear_ct_volume()
         self._compression_results = None
+        self._initial_annotations = None
         self._data_manager.clear_voxel_grid()
         self._compression_panel.clear_results()
         if hasattr(self, '_structure_panel'):
             self._structure_panel.reset_structure()
         
         # Reset viewers
-        if self._stl_loader and self._stl_loader.mesh:
-            self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
+        stl_loader = self._data_manager.stl_loader
+        if stl_loader and stl_loader.mesh:
+            self._viewer_3d_panel.set_mesh(stl_loader.mesh)
         
         # Update memory estimate with new dimensions
-        if self._stl_loader.info:
+        if stl_loader is not None and stl_loader.info:
              self._params_panel.update_memory_estimate(
-                 tuple(self._stl_loader.info.dimensions),
-                 self._stl_loader.info.num_faces
+                 tuple(stl_loader.info.dimensions),
+                 stl_loader.info.num_faces
              )
         
         self._status_bar.showMessage(f"Model scaled by {scale_factor:.2f}脳. Data reset.")
@@ -1117,12 +1137,14 @@ class MainWindow(QMainWindow):
     
     def _on_params_changed(self) -> None:
         """Handle parameter changes - update memory estimate."""
-        if self._stl_loader is not None and self._stl_loader.info is not None:
-            self._params_panel.update_memory_estimate(tuple(self._stl_loader.info.dimensions), self._stl_loader.info.num_faces)
+        stl_info = self._data_manager.stl_info
+        if stl_info is not None:
+            self._params_panel.update_memory_estimate(tuple(stl_info.dimensions), stl_info.num_faces)
     
     def _on_simulate(self) -> None:
         """Run CT simulation."""
-        if self._stl_loader is None or self._stl_loader.mesh is None:
+        stl_loader = self._data_manager.stl_loader
+        if stl_loader is None or stl_loader.mesh is None:
             return
         
         # Check if a worker is already running
@@ -1144,7 +1166,7 @@ class MainWindow(QMainWindow):
         
         # Create worker
         self._worker = SimulationWorker(
-            mesh=self._stl_loader.mesh,
+            mesh=stl_loader.mesh,
             voxel_size=self._params_panel.voxel_size,
             fill_interior=self._params_panel.fill_interior,
             num_projections=self._params_panel.num_projections,
@@ -1179,7 +1201,6 @@ class MainWindow(QMainWindow):
     @Slot(object, dict, list, object)
     def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list, annotations=None) -> None:
         """Handle simulation completed."""
-        self._ct_volume = ct_volume
         self._compression_results = compression_results
         self._initial_annotations = annotations  # Store for export
         
@@ -1199,6 +1220,13 @@ class MainWindow(QMainWindow):
             
             # Display final step in 3D
             final_result = compression_results[-1]
+            self._data_manager.set_ct_volume(
+                CTVolume(
+                    data=final_result.volume,
+                    voxel_size=final_result.voxel_size,
+                    origin=ct_volume.origin.copy(),
+                )
+            )
             threshold = self._auto_isosurface_threshold(final_result.volume)
             self._viewer_3d_panel.set_ct_volume(
                 final_result.volume,
@@ -1211,6 +1239,7 @@ class MainWindow(QMainWindow):
             )
         else:
             # No compression - display single volume
+            self._data_manager.set_ct_volume(ct_volume)
             self._viewer_panel.set_volume(ct_volume.data)
             self._compression_panel.clear_results()
             
@@ -1282,7 +1311,8 @@ class MainWindow(QMainWindow):
     
     def _on_export(self) -> None:
         """Export CT volume to DICOM."""
-        if self._ct_volume is None:
+        has_series = bool(self._compression_results and len(self._compression_results) > 1)
+        if not has_series and not self._data_manager.has_ct_volume:
             QMessageBox.warning(
                 self,
                 "No Data",
@@ -1321,7 +1351,7 @@ class MainWindow(QMainWindow):
         if self._compression_results and len(self._compression_results) > 1:
             data_to_export = self._compression_results
         else:
-            data_to_export = self._ct_volume
+            data_to_export = self._data_manager.ct_volume
 
         self._worker = ExportWorker(
             volume_or_list=data_to_export,
@@ -1367,8 +1397,9 @@ class MainWindow(QMainWindow):
 
     def _on_reset_stl(self) -> None:
         """Reset 3D view to show STL mesh and reset structure."""
-        if self._stl_loader is not None and self._stl_loader.mesh is not None:
-            self._viewer_3d_panel.set_mesh(self._stl_loader.mesh)
+        stl_loader = self._data_manager.stl_loader
+        if stl_loader is not None and stl_loader.mesh is not None:
+            self._viewer_3d_panel.set_mesh(stl_loader.mesh)
             
             # Reset structure generation panel as well
             if hasattr(self, '_structure_panel'):
@@ -1402,6 +1433,15 @@ class MainWindow(QMainWindow):
         
         # Update 3D viewer with the selected step's volume
         voxel_size = self._data_manager.voxel_grid.voxel_size if self._data_manager.has_voxel_grid else 0.5
+        current_ct = self._data_manager.ct_volume
+        origin = current_ct.origin.copy() if current_ct is not None else np.zeros(3, dtype=np.float32)
+        self._data_manager.set_ct_volume(
+            CTVolume(
+                data=volume_data,
+                voxel_size=voxel_size,
+                origin=origin,
+            )
+        )
         threshold = self._auto_isosurface_threshold(volume_data)
         
         self._viewer_3d_panel.set_ct_volume(
@@ -2458,7 +2498,8 @@ class SimulationWorker(QThread):
                 from simulation.mechanics.manager import CompressionConfig, CompressionResult
                 
                 cfg = self.compression_config
-                manager = CompressionManager(use_gpu=cfg.get('use_gpu', True))
+                # Compression acceleration follows the main simulation GPU setting.
+                manager = CompressionManager(use_gpu=self.use_gpu)
                 
                 comp_config = CompressionConfig(
                     total_compression=cfg['total_compression'],
@@ -2468,7 +2509,6 @@ class SimulationWorker(QThread):
                     use_physics=cfg['mode'] == 'physical',
                     downsample_factor=cfg.get('downsample_factor', 4),
                     solver_iterations=cfg.get('solver_iterations', 300),
-                    use_gpu=cfg.get('use_gpu', True),
                     export_dicom=False
                 )
                 
@@ -2518,11 +2558,19 @@ class SimulationWorker(QThread):
                         )
                         
                         # Run CT simulation on this deformed grid
-                        step_ct = simulator.simulate(
-                            deformed_grid,
-                            material=self.material,
-                            progress_callback=step_cb
-                        )
+                        if self.physics_mode:
+                            step_ct = simulator.simulate(
+                                deformed_grid,
+                                material=self.material,
+                                density_scale=getattr(deform_result, 'density_scale', 1.0),
+                                progress_callback=step_cb
+                            )
+                        else:
+                            step_ct = simulator.simulate(
+                                deformed_grid,
+                                material=self.material,
+                                progress_callback=step_cb
+                            )
                         step_ct_data = step_ct.data
                         step_ct_voxel_size = step_ct.voxel_size
                     
@@ -2532,6 +2580,7 @@ class SimulationWorker(QThread):
                         compression_ratio=deform_result.compression_ratio,
                         _volume=step_ct_data,  # Use CT simulated data
                         voxel_size=step_ct_voxel_size,
+                        density_scale=getattr(deform_result, 'density_scale', 1.0),
                         annotations=deform_result.annotations,
                     ))
                 
@@ -2783,7 +2832,7 @@ from typing import Optional, List
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QSpinBox, QDoubleSpinBox, QComboBox,
-    QPushButton, QCheckBox, QProgressBar, QFileDialog,
+    QPushButton, QProgressBar, QFileDialog,
     QLineEdit, QGroupBox, QSlider, QFrame
 )
 from PySide6.QtCore import Qt, Signal
@@ -2887,10 +2936,6 @@ class CompressionPanel(QWidget):
         )
         params_layout.addRow("Iterations:", self._iterations_spin)
         
-        self._gpu_check = QCheckBox("Use GPU")
-        self._gpu_check.setChecked(True)
-        params_layout.addRow("", self._gpu_check)
-        
         main_layout.addWidget(params_group)
         
         # === Results Viewer Section (hidden until results) ===
@@ -2956,7 +3001,6 @@ class CompressionPanel(QWidget):
             'poisson_ratio': self._poisson_spin.value(),
             'downsample_factor': self._downsample_spin.value(),
             'solver_iterations': self._iterations_spin.value(),
-            'use_gpu': self._gpu_check.isChecked(),
         }
     
     def set_results(self, results: list):
@@ -4214,22 +4258,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 
+from visualization.slice_viewer import SliceViewer, WINDOW_PRESETS
+
 try:
     import pyqtgraph as pg
     HAS_PYQTGRAPH = True
 except ImportError:
     HAS_PYQTGRAPH = False
-
-
-# Window presets for attenuation-value viewing
-WINDOW_PRESETS = {
-    "Low Density": {"center": 0.03, "width": 0.10},
-    "Water / Soft": {"center": 0.20, "width": 0.30},
-    "Bone / Light Metal": {"center": 0.70, "width": 1.20},
-    "Dense Metal": {"center": 3.00, "width": 6.00},
-    "High-Z Metal": {"center": 40.00, "width": 100.00},
-    "Custom": {"center": 0.20, "width": 0.40},
-}
 
 
 class ViewerPanel(QWidget):
@@ -4240,10 +4275,9 @@ class ViewerPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
-        self._volume: Optional[np.ndarray] = None
+        self._slice_viewer = SliceViewer()
         self._volumes: List[np.ndarray] = []  # Time-series volumes
         self._current_step: int = 0
-        self._current_slice = 0
 
         # High-resolution percent mapping for smooth window/level control.
         self._slider_resolution = 100000
@@ -4361,8 +4395,8 @@ class ViewerPanel(QWidget):
         Args:
             volume: 3D numpy array (slices, height, width) in linear attenuation values (cm^-1)
         """
-        self._volume = volume
-        num_slices = volume.shape[0]
+        self._slice_viewer.set_volume(volume)
+        num_slices = self._slice_viewer.num_slices
         
         # Update slice controls
         self._slice_slider.setRange(0, num_slices - 1)
@@ -4370,9 +4404,13 @@ class ViewerPanel(QWidget):
         self._total_slices_label.setText(f"/ {num_slices}")
         
         # Reset to middle slice
-        middle = num_slices // 2
+        middle = self._slice_viewer.current_slice
+        self._slice_slider.blockSignals(True)
+        self._slice_spin.blockSignals(True)
         self._slice_slider.setValue(middle)
-        self._current_slice = middle
+        self._slice_spin.setValue(middle)
+        self._slice_slider.blockSignals(False)
+        self._slice_spin.blockSignals(False)
 
         finite_values = volume[np.isfinite(volume)]
         if finite_values.size > 0:
@@ -4426,6 +4464,10 @@ class ViewerPanel(QWidget):
         self._wc_slider.blockSignals(False)
         self._ww_slider.blockSignals(False)
 
+        self._slice_viewer.set_window(
+            self._slider_to_center(center_slider),
+            self._slider_to_width(width_slider),
+        )
         self._update_window_labels()
 
     def _center_to_slider(self, center: float) -> int:
@@ -4482,21 +4524,23 @@ class ViewerPanel(QWidget):
     
     def _on_slice_changed(self, value: int) -> None:
         """Handle slice slider change."""
-        self._current_slice = value
+        self._slice_viewer.set_slice(value)
+        current_slice = self._slice_viewer.current_slice
         self._slice_spin.blockSignals(True)
-        self._slice_spin.setValue(value)
+        self._slice_spin.setValue(current_slice)
         self._slice_spin.blockSignals(False)
         self._update_display()
-        self.slice_changed.emit(value)
+        self.slice_changed.emit(current_slice)
     
     def _on_slice_spin_changed(self, value: int) -> None:
         """Handle slice spin box change."""
-        self._current_slice = value
+        self._slice_viewer.set_slice(value)
+        current_slice = self._slice_viewer.current_slice
         self._slice_slider.blockSignals(True)
-        self._slice_slider.setValue(value)
+        self._slice_slider.setValue(current_slice)
         self._slice_slider.blockSignals(False)
         self._update_display()
-        self.slice_changed.emit(value)
+        self.slice_changed.emit(current_slice)
     
     def _on_preset_changed(self, preset_name: str) -> None:
         """Handle preset combo change."""
@@ -4512,6 +4556,7 @@ class ViewerPanel(QWidget):
         """Handle window/level slider change."""
         wc = self._slider_to_center(self._wc_slider.value())
         ww = self._slider_to_width(self._ww_slider.value())
+        self._slice_viewer.set_window(wc, ww)
         self._update_window_labels()
         
         # Set combo to Custom if values don't match any preset
@@ -4530,23 +4575,9 @@ class ViewerPanel(QWidget):
     
     def _update_display(self) -> None:
         """Update the image display."""
-        if self._volume is None:
+        normalized = self._slice_viewer.get_windowed_slice()
+        if normalized is None:
             return
-        
-        # Get current slice
-        slice_data = self._volume[self._current_slice, :, :]
-        
-        # Apply window/level
-        wc = self._slider_to_center(self._wc_slider.value())
-        ww = self._slider_to_width(self._ww_slider.value())
-        
-        lower = wc - ww / 2
-        upper = wc + ww / 2
-        if upper <= lower:
-            upper = lower + 1e-6
-        
-        windowed = np.clip(slice_data, lower, upper)
-        normalized = ((windowed - lower) / (upper - lower) * 255).astype(np.uint8)
         
         if HAS_PYQTGRAPH:
             self._image_view.setImage(normalized.T, autoLevels=False, 
@@ -4566,12 +4597,12 @@ class ViewerPanel(QWidget):
     @property
     def window_center(self) -> float:
         """Get current window center."""
-        return self._slider_to_center(self._wc_slider.value())
+        return self._slice_viewer.window_center
     
     @property
     def window_width(self) -> float:
         """Get current window width."""
-        return self._slider_to_width(self._ww_slider.value())
+        return self._slice_viewer.window_width
     
     def set_volume_series(self, volumes: List[np.ndarray]) -> None:
         """
@@ -4599,11 +4630,11 @@ class ViewerPanel(QWidget):
         self._current_step = step
         
         # Preserve current slice position
-        current_slice = self._current_slice
+        current_slice = self._slice_viewer.current_slice
         
         # Set new volume but try to keep same slice
         volume = self._volumes[step]
-        self._volume = volume
+        self._slice_viewer.set_volume(volume)
         
         # Adjust slice if out of range
         max_slice = volume.shape[0] - 1
@@ -4615,8 +4646,13 @@ class ViewerPanel(QWidget):
         self._slice_spin.setRange(0, volume.shape[0] - 1)
         self._total_slices_label.setText(f"/ {volume.shape[0]}")
         
-        self._current_slice = current_slice
-        self._slice_slider.setValue(current_slice)
+        self._slice_viewer.set_slice(current_slice)
+        self._slice_slider.blockSignals(True)
+        self._slice_spin.blockSignals(True)
+        self._slice_slider.setValue(self._slice_viewer.current_slice)
+        self._slice_spin.setValue(self._slice_viewer.current_slice)
+        self._slice_slider.blockSignals(False)
+        self._slice_spin.blockSignals(False)
 
         finite_values = volume[np.isfinite(volume)]
         if finite_values.size > 0:
@@ -5444,7 +5480,7 @@ The core quantity is the linear attenuation coefficient:
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Mapping, Iterator, Any
 from enum import Enum
 import numpy as np
 
@@ -5802,21 +5838,65 @@ class MaterialDatabase:
 
 PhysicalMaterial = Material
 
-PHYSICAL_MATERIALS: Dict[str, Material] = {
-    mat_type.value: MaterialDatabase._MATERIALS[mat_type]
-    for mat_type in MaterialType
-    if mat_type != MaterialType.CUSTOM
-}
+def _material_type_from_key(material_key: Any) -> Optional[MaterialType]:
+    """Resolve a material key to MaterialType, returning None for invalid/custom keys."""
+    if isinstance(material_key, MaterialType):
+        return None if material_key == MaterialType.CUSTOM else material_key
+
+    if material_key is None:
+        return None
+
+    text = str(material_key).strip().lower()
+    if not text:
+        return None
+
+    try:
+        mat_type = MaterialType(text)
+    except ValueError:
+        return None
+    return None if mat_type == MaterialType.CUSTOM else mat_type
+
+
+class _PhysicalMaterialRegistry(Mapping[str, Material]):
+    """
+    Read-only compatibility view over MaterialDatabase.
+
+    This avoids maintaining a copied/stale physical-material dictionary.
+    """
+
+    def __getitem__(self, key: str) -> Material:
+        mat_type = _material_type_from_key(key)
+        if mat_type is None:
+            raise KeyError(key)
+        return MaterialDatabase._MATERIALS[mat_type]
+
+    def __iter__(self) -> Iterator[str]:
+        return (mat_type.value for mat_type in MaterialType if mat_type != MaterialType.CUSTOM)
+
+    def __len__(self) -> int:
+        return sum(1 for mat_type in MaterialType if mat_type != MaterialType.CUSTOM)
+
+    def get(self, key: str, default: Optional[Material] = None) -> Optional[Material]:
+        mat_type = _material_type_from_key(key)
+        if mat_type is None:
+            return default
+        return MaterialDatabase._MATERIALS.get(mat_type, default)
+
+
+PHYSICAL_MATERIALS: Mapping[str, Material] = _PhysicalMaterialRegistry()
 
 
 def get_physical_material(name: str) -> Optional[Material]:
-    """Get physical material by name (case-insensitive)."""
-    return PHYSICAL_MATERIALS.get(name.lower())
+    """Get physical material by name or key (case-insensitive)."""
+    return material_type_to_physical(name)
 
 
-def material_type_to_physical(material_type_value: str) -> Optional[Material]:
-    """Convert MaterialType value to Material with physics support."""
-    return PHYSICAL_MATERIALS.get(material_type_value.lower())
+def material_type_to_physical(material_type_value: Any) -> Optional[Material]:
+    """Resolve a material key or MaterialType to physical Material."""
+    mat_type = _material_type_from_key(material_type_value)
+    if mat_type is None:
+        return None
+    return MaterialDatabase._MATERIALS.get(mat_type)
 
 
 --- FILE: .\simulation\simple_simulator.py ---
@@ -7597,7 +7677,6 @@ class CompressionConfig:
     solver_iterations: int = 300
     
     # GPU settings
-    use_gpu: bool = True
     warp_chunk_size: int = 64
     
     # Output settings
@@ -7615,6 +7694,7 @@ class CompressionResult:
     dicom_path: Optional[Path] = None
     cache_path: Optional[str] = None
     annotations: Optional[AnnotationSet] = None
+    density_scale: float = 1.0
     
     def __post_init__(self):
         # Backward compatibility for positional args if needed, though dataclasses handle init
@@ -7706,7 +7786,7 @@ class CompressionManager:
         results = []
         current_volume = volume.copy()
         
-        # Track cumulative compression for annotation transformation
+        # Track cumulative compression for annotation transformation and density scaling.
         cumulative_scale = np.array([1.0, 1.0, 1.0])  # (z, y, x)
         
         # Rotate volume to standardize compression axis (always compress on Z)
@@ -7739,6 +7819,7 @@ class CompressionManager:
             compression_ratio=0.0,
             _volume=initial_volume,
             voxel_size=voxel_size,
+            density_scale=1.0,
             annotations=initial_annotations,
         ))
         
@@ -7768,21 +7849,23 @@ class CompressionManager:
                 disp_fields = None
             
             current_volume = deformed
+
+            # Compute cumulative affine deformation scale for this time step.
+            inc_scale_z = 1.0 - incremental_ratio
+            inc_scale_xy = 1.0 + config.poisson_ratio * incremental_ratio
+            cumulative_scale *= np.array([inc_scale_z, inc_scale_xy, inc_scale_xy])
             
             # --- Transform annotations for this step ---
             step_annotations = None
             if initial_annotations is not None:
-                # Compute cumulative scale for this time step
-                inc_scale_z = 1.0 - incremental_ratio
-                inc_scale_xy = 1.0 + config.poisson_ratio * incremental_ratio
-                cumulative_scale *= np.array([inc_scale_z, inc_scale_xy, inc_scale_xy])
-                
                 step_annotations = self._transform_annotations(
                     initial_annotations, step, step_ratio,
                     cumulative_scale, voxel_size,
                     current_volume.shape, original_axis,
                     disp_fields,
                 )
+
+            density_scale = self._mass_conserving_density_scale(cumulative_scale)
             
             # Un-rotate for storage
             store_volume = current_volume.copy()
@@ -7798,6 +7881,7 @@ class CompressionManager:
                 compression_ratio=step_ratio,
                 _volume=store_volume,
                 voxel_size=voxel_size,
+                density_scale=density_scale,
                 annotations=step_annotations,
             )
             results.append(result)
@@ -7812,6 +7896,12 @@ class CompressionManager:
             progress_callback(1.0, "Simulation complete")
         
         return results
+
+    @staticmethod
+    def _mass_conserving_density_scale(scale_factors: np.ndarray) -> float:
+        """Compute density multiplier from affine volume scaling (rho' = rho / det(S))."""
+        volume_scale = float(np.prod(np.abs(np.asarray(scale_factors, dtype=np.float64))))
+        return 1.0 / max(volume_scale, 1e-12)
 
     def _transform_annotations(
         self,
@@ -8876,6 +8966,7 @@ Physical Material Definitions
 
 NOTE: This module is deprecated. All functionality has been merged into
 simulation.materials. This file re-exports for backward compatibility.
+`PHYSICAL_MATERIALS` is a dynamic registry view (not a copied dict snapshot).
 """
 
 from ..materials import (
@@ -8922,9 +9013,9 @@ except ImportError:
 
 
 from ..voxelizer import VoxelGrid
-from ..materials import MaterialType
+from ..materials import MaterialType, MaterialDatabase
 from .spectrum import SpectrumGenerator, XRaySpectrum
-from .physical_material import PHYSICAL_MATERIALS, material_type_to_physical
+from .physical_material import material_type_to_physical
 from ..backends import get_backend
 
 
@@ -9035,7 +9126,8 @@ class PhysicalCTSimulator:
         voxel_grid: VoxelGrid,
         material: MaterialType = MaterialType.BONE_CORTICAL,
         background: MaterialType = MaterialType.AIR,
-        progress_callback: Optional[Callable[[float], None]] = None
+        progress_callback: Optional[Callable[[float], None]] = None,
+        density_scale: float = 1.0,
     ) -> "CTVolume":
         """
         Simulate CT scan with physical X-ray model.
@@ -9045,6 +9137,8 @@ class PhysicalCTSimulator:
             material: Material type for the object
             background: Material type for empty space
             progress_callback: Optional progress callback (0.0-1.0)
+            density_scale: Multiplicative factor for object density/attenuation.
+                Use >1.0 for compression under mass conservation.
             
         Returns:
             CTVolume with reconstructed absolute linear attenuation values (cm^-1)
@@ -9056,12 +9150,13 @@ class PhysicalCTSimulator:
         # Get physical materials
         phys_material = material_type_to_physical(material.value)
         phys_background = material_type_to_physical(background.value)
+        material_db = MaterialDatabase()
         
         if phys_material is None:
             logging.warning(f"No physics data for {material.value}, using bone_cortical")
-            phys_material = PHYSICAL_MATERIALS["bone_cortical"]
+            phys_material = material_db.get_material(MaterialType.BONE_CORTICAL)
         if phys_background is None:
-            phys_background = PHYSICAL_MATERIALS["air"]
+            phys_background = material_db.get_material(MaterialType.AIR)
         
         # Prepare energy bins (coarse for speed)
         energy_edges = np.linspace(
@@ -9073,6 +9168,10 @@ class PhysicalCTSimulator:
         
         # Pre-calculate attenuation coefficients per energy bin
         mu_object = phys_material.get_mu_array(bin_centers)
+        if not np.isfinite(density_scale) or density_scale <= 0:
+            logging.warning("Invalid density_scale=%.6g, falling back to 1.0", density_scale)
+            density_scale = 1.0
+        mu_object = mu_object * float(density_scale)
         mu_background = phys_background.get_mu_array(bin_centers)
         
         # Bin the spectrum
@@ -9886,34 +9985,78 @@ class VoidAnnotation:
             new_center: New center in world coords (mm).
             scale_factors: Scale factors (sx, sy, sz) to apply to radii.
         """
-        new_radius = self.radius_mm * np.mean(np.abs(scale_factors))
-        new_radii = self.radii_mm * np.abs(scale_factors) if self.radii_mm is not None else None
+        scale_factors = np.asarray(scale_factors, dtype=np.float64)
+        abs_scale = np.abs(scale_factors)
+        if abs_scale.shape != (3,):
+            raise ValueError(f"scale_factors must be shape (3,), got {abs_scale.shape}")
 
-        # Recompute volume
-        if self.shape == "sphere":
-            new_vol = (4 / 3) * np.pi * new_radius ** 3
-        elif self.shape == "ellipsoid" and new_radii is not None:
-            new_vol = (4 / 3) * np.pi * np.prod(new_radii)
-        elif self.shape == "cylinder":
-            cyl_r = new_radius / 2 if self.length_mm else new_radius
-            cyl_len = (self.length_mm or 0) * np.abs(scale_factors).mean()
-            new_vol = np.pi * cyl_r ** 2 * cyl_len
-        else:
-            new_vol = self.volume_mm3 * np.prod(np.abs(scale_factors))
+        volume_scale = float(np.prod(abs_scale))
+        isotropic_tol = 1e-3
 
+        new_shape = self.shape
         new_axis = None
         new_length = self.length_mm
-        if self.axis_direction is not None:
-            new_axis = self.axis_direction * scale_factors
+        new_radii = None
+        new_radius = float(self.radius_mm)
+        new_vol = float(self.volume_mm3 * volume_scale)
+
+        if self.shape == DefectShape.SPHERE.value:
+            if np.max(abs_scale) - np.min(abs_scale) <= isotropic_tol:
+                new_radius = float(self.radius_mm * abs_scale.mean())
+                new_vol = float((4.0 / 3.0) * np.pi * new_radius ** 3)
+            else:
+                # A sphere under anisotropic scaling becomes an ellipsoid.
+                ellipsoid_radii = np.maximum(self.radius_mm * abs_scale, 0.0)
+                new_shape = DefectShape.ELLIPSOID.value
+                new_radii = ellipsoid_radii
+                new_vol = float((4.0 / 3.0) * np.pi * np.prod(ellipsoid_radii))
+                new_radius = float(np.cbrt(np.prod(ellipsoid_radii)))
+
+        elif self.shape == DefectShape.ELLIPSOID.value:
+            base_radii = self.radii_mm if self.radii_mm is not None else np.full(3, self.radius_mm, dtype=np.float64)
+            ellipsoid_radii = np.maximum(np.asarray(base_radii, dtype=np.float64) * abs_scale, 0.0)
+            new_radii = ellipsoid_radii
+            new_vol = float((4.0 / 3.0) * np.pi * np.prod(ellipsoid_radii))
+            new_radius = float(np.cbrt(np.prod(ellipsoid_radii)))
+
+        elif self.shape == DefectShape.CYLINDER.value:
+            axis = np.asarray(
+                self.axis_direction if self.axis_direction is not None else np.array([1.0, 0.0, 0.0], dtype=np.float64),
+                dtype=np.float64,
+            )
+            axis_norm = np.linalg.norm(axis)
+            if axis_norm > 0:
+                axis = axis / axis_norm
+            else:
+                axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+
+            scaled_axis_vec = axis * scale_factors
+            length_scale = float(np.linalg.norm(scaled_axis_vec))
+            if length_scale > 0:
+                new_axis = scaled_axis_vec / length_scale
+            else:
+                new_axis = axis.copy()
+                length_scale = 1.0
+
+            # Legacy representation stores cylinder diameter in radius_mm.
+            cyl_radius = float(self.radius_mm) / 2.0
+            area_scale = volume_scale / max(length_scale, 1e-12)
+            cyl_radius_new = cyl_radius * float(np.sqrt(max(area_scale, 0.0)))
+            new_length = float((self.length_mm or 0.0) * length_scale)
+            new_radius = float(cyl_radius_new * 2.0)
+            new_vol = float(np.pi * cyl_radius_new ** 2 * new_length)
+
+        elif self.axis_direction is not None:
+            new_axis = np.asarray(self.axis_direction, dtype=np.float64) * scale_factors
             norm = np.linalg.norm(new_axis)
             if norm > 0:
                 new_axis = new_axis / norm
-        if self.length_mm is not None:
-            new_length = self.length_mm * np.abs(scale_factors).mean()
+            else:
+                new_axis = None
 
         return VoidAnnotation(
             id=self.id,
-            shape=self.shape,
+            shape=new_shape,
             center_mm=new_center.copy(),
             radius_mm=float(new_radius),
             volume_mm3=float(new_vol),
@@ -9941,54 +10084,132 @@ class AnnotationSet:
     # Bounding box computation
     # ------------------------------------------------------------------
 
+    def _continuous_bounds_to_inclusive_bbox(
+        self,
+        min_corner_voxel: np.ndarray,
+        max_corner_voxel: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Convert continuous voxel-space bounds to inclusive integer bbox indices.
+
+        Uses a tiny epsilon to suppress float-jitter boundary expansion, e.g.
+        15.000000001 should map to 15 instead of 16.
+        """
+        eps = 1e-6  # voxel units
+        vol_max = np.asarray(self.volume_shape, dtype=np.int64) - 1
+
+        min_idx = np.floor(np.asarray(min_corner_voxel, dtype=np.float64) + eps).astype(np.int64)
+        max_idx = np.ceil(np.asarray(max_corner_voxel, dtype=np.float64) - eps).astype(np.int64)
+
+        min_idx = np.clip(min_idx, 0, vol_max)
+        max_idx = np.clip(max_idx, 0, vol_max)
+        max_idx = np.maximum(max_idx, min_idx)
+        return min_idx, max_idx
+
     def recompute_bboxes(self) -> None:
         """Recompute voxel-space bounding boxes for all voids."""
         for v in self.voids:
             center_voxel = (v.center_mm - self.origin) / self.voxel_size
             if v.shape == "sphere":
                 half = v.radius_mm / self.voxel_size
-                v.bbox_voxel_min = np.maximum(
-                    np.floor(center_voxel - half).astype(int), 0
-                )
-                v.bbox_voxel_max = np.minimum(
-                    np.ceil(center_voxel + half).astype(int),
-                    np.array(self.volume_shape) - 1,
+                v.bbox_voxel_min, v.bbox_voxel_max = self._continuous_bounds_to_inclusive_bbox(
+                    center_voxel - half,
+                    center_voxel + half,
                 )
             elif v.shape == "ellipsoid" and v.radii_mm is not None:
                 half = v.radii_mm / self.voxel_size
-                v.bbox_voxel_min = np.maximum(
-                    np.floor(center_voxel - half).astype(int), 0
-                )
-                v.bbox_voxel_max = np.minimum(
-                    np.ceil(center_voxel + half).astype(int),
-                    np.array(self.volume_shape) - 1,
+                v.bbox_voxel_min, v.bbox_voxel_max = self._continuous_bounds_to_inclusive_bbox(
+                    center_voxel - half,
+                    center_voxel + half,
                 )
             elif v.shape == "cylinder":
                 # Conservative bbox using max extent
                 max_extent = max(
                     v.radius_mm, (v.length_mm or 0) / 2
                 ) / self.voxel_size
-                v.bbox_voxel_min = np.maximum(
-                    np.floor(center_voxel - max_extent).astype(int), 0
-                )
-                v.bbox_voxel_max = np.minimum(
-                    np.ceil(center_voxel + max_extent).astype(int),
-                    np.array(self.volume_shape) - 1,
+                v.bbox_voxel_min, v.bbox_voxel_max = self._continuous_bounds_to_inclusive_bbox(
+                    center_voxel - max_extent,
+                    center_voxel + max_extent,
                 )
             else:
                 # Lattice voids or unknown: use radius as half-extent
                 half = v.radius_mm / self.voxel_size
-                v.bbox_voxel_min = np.maximum(
-                    np.floor(center_voxel - half).astype(int), 0
-                )
-                v.bbox_voxel_max = np.minimum(
-                    np.ceil(center_voxel + half).astype(int),
-                    np.array(self.volume_shape) - 1,
+                v.bbox_voxel_min, v.bbox_voxel_max = self._continuous_bounds_to_inclusive_bbox(
+                    center_voxel - half,
+                    center_voxel + half,
                 )
 
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
+
+    def _compute_void_local_mask(
+        self,
+        v: VoidAnnotation,
+    ) -> Optional[Tuple[int, int, int, np.ndarray]]:
+        """
+        Compute a per-void local 3D boolean mask within its bbox extent.
+
+        Returns:
+            (z0, y0, x0, mask) where mask has shape (z, y, x), or None.
+        """
+        if v.bbox_voxel_min is None or v.bbox_voxel_max is None:
+            return None
+
+        nz, ny, nx = self.volume_shape
+        vs = self.voxel_size
+        center_voxel = (v.center_mm - self.origin) / vs
+
+        z0, y0, x0 = v.bbox_voxel_min.astype(int)
+        z1, y1, x1 = v.bbox_voxel_max.astype(int) + 1  # inclusive -> half-open
+
+        # Clamp to volume bounds
+        z0, y0, x0 = max(z0, 0), max(y0, 0), max(x0, 0)
+        z1, y1, x1 = min(z1, nz), min(y1, ny), min(x1, nx)
+        if z1 <= z0 or y1 <= y0 or x1 <= x0:
+            return None
+
+        zz, yy, xx = np.mgrid[z0:z1, y0:y1, x0:x1]
+
+        if v.shape == "sphere":
+            dist2 = (
+                (zz - center_voxel[0]) ** 2
+                + (yy - center_voxel[1]) ** 2
+                + (xx - center_voxel[2]) ** 2
+            )
+            r_vox = v.radius_mm / vs
+            mask = dist2 <= r_vox ** 2
+
+        elif v.shape == "ellipsoid" and v.radii_mm is not None:
+            r_vox = v.radii_mm / vs
+            mask = (
+                ((zz - center_voxel[0]) / r_vox[0]) ** 2
+                + ((yy - center_voxel[1]) / r_vox[1]) ** 2
+                + ((xx - center_voxel[2]) / r_vox[2]) ** 2
+            ) <= 1.0
+
+        elif v.shape == "cylinder" and v.axis_direction is not None:
+            axis = v.axis_direction
+            cyl_r = (v.radius_mm / 2) / vs
+            cyl_half_len = ((v.length_mm or 0) / 2) / vs
+            dz = zz - center_voxel[0]
+            dy = yy - center_voxel[1]
+            dx = xx - center_voxel[2]
+            proj = dz * axis[0] + dy * axis[1] + dx * axis[2]
+            perp2 = dz ** 2 + dy ** 2 + dx ** 2 - proj ** 2
+            mask = (perp2 <= cyl_r ** 2) & (np.abs(proj) <= cyl_half_len)
+
+        else:
+            # Lattice voids or fallback: sphere approximation from radius.
+            dist2 = (
+                (zz - center_voxel[0]) ** 2
+                + (yy - center_voxel[1]) ** 2
+                + (xx - center_voxel[2]) ** 2
+            )
+            r_vox = v.radius_mm / vs
+            mask = dist2 <= r_vox ** 2
+
+        return z0, y0, x0, mask
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to JSON-friendly dict."""
@@ -10006,7 +10227,7 @@ class AnnotationSet:
         """Convert to COCO object-detection format (per-slice 2D bboxes).
 
         Produces annotations for axial slices (axis=0) where each void
-        intersects the slice plane.
+        intersects the slice plane, using the true per-slice intersection mask.
         """
         images = []
         annotations = []
@@ -10021,26 +10242,42 @@ class AnnotationSet:
                 "width": int(nx),
                 "height": int(ny),
             })
-            for v in self.voids:
-                if v.bbox_voxel_min is None or v.bbox_voxel_max is None:
+
+        for v in self.voids:
+            local = self._compute_void_local_mask(v)
+            if local is None:
+                continue
+            z0, y0, x0, mask = local
+
+            for local_z in range(mask.shape[0]):
+                slice_mask = mask[local_z]
+                if not np.any(slice_mask):
                     continue
-                z_min, y_min, x_min = v.bbox_voxel_min
-                z_max, y_max, x_max = v.bbox_voxel_max
-                if z_min <= z <= z_max:
-                    w = int(x_max - x_min)
-                    h = int(y_max - y_min)
-                    if w > 0 and h > 0:
-                        annotations.append({
-                            "id": ann_id,
-                            "image_id": image_id,
-                            "category_id": 1,
-                            "bbox": [int(x_min), int(y_min), w, h],
-                            "area": w * h,
-                            "iscrowd": 0,
-                            "void_id": int(v.id),
-                            "void_shape": v.shape,
-                        })
-                        ann_id += 1
+
+                ys, xs = np.where(slice_mask)
+                y_min = int(y0 + ys.min())
+                y_max = int(y0 + ys.max())
+                x_min = int(x0 + xs.min())
+                x_max = int(x0 + xs.max())
+                z = int(z0 + local_z)
+
+                # Inclusive discrete bounds -> +1
+                w = int(x_max - x_min + 1)
+                h = int(y_max - y_min + 1)
+                if w <= 0 or h <= 0:
+                    continue
+
+                annotations.append({
+                    "id": ann_id,
+                    "image_id": z + 1,
+                    "category_id": 1,
+                    "bbox": [x_min, y_min, w, h],
+                    "area": w * h,
+                    "iscrowd": 0,
+                    "void_id": int(v.id),
+                    "void_shape": v.shape,
+                })
+                ann_id += 1
 
         return {
             "images": images,
@@ -10071,68 +10308,16 @@ class AnnotationSet:
             int16 array of shape ``volume_shape`` with 0 = background.
         """
         labels = np.zeros(self.volume_shape, dtype=np.int16)
-        vs = self.voxel_size
 
         for v in self.voids:
-            center_voxel = (v.center_mm - self.origin) / vs
-
-            if v.bbox_voxel_min is None or v.bbox_voxel_max is None:
+            local = self._compute_void_local_mask(v)
+            if local is None:
                 continue
+            z0, y0, x0, mask = local
 
-            z0, y0, x0 = v.bbox_voxel_min.astype(int)
-            z1, y1, x1 = v.bbox_voxel_max.astype(int) + 1
-            # Clamp
-            z0, y0, x0 = max(z0, 0), max(y0, 0), max(x0, 0)
-            nz, ny, nx = self.volume_shape
-            z1, y1, x1 = min(z1, nz), min(y1, ny), min(x1, nx)
-
-            if z1 <= z0 or y1 <= y0 or x1 <= x0:
-                continue
-
-            zz, yy, xx = np.mgrid[z0:z1, y0:y1, x0:x1]
-
-            if v.shape == "sphere":
-                dist2 = (
-                    (zz - center_voxel[0]) ** 2
-                    + (yy - center_voxel[1]) ** 2
-                    + (xx - center_voxel[2]) ** 2
-                )
-                r_vox = v.radius_mm / vs
-                mask = dist2 <= r_vox ** 2
-
-            elif v.shape == "ellipsoid" and v.radii_mm is not None:
-                r_vox = v.radii_mm / vs
-                dist2 = (
-                    ((zz - center_voxel[0]) / r_vox[0]) ** 2
-                    + ((yy - center_voxel[1]) / r_vox[1]) ** 2
-                    + ((xx - center_voxel[2]) / r_vox[2]) ** 2
-                )
-                mask = dist2 <= 1.0
-
-            elif v.shape == "cylinder" and v.axis_direction is not None:
-                axis = v.axis_direction
-                cyl_r = (v.radius_mm / 2) / vs
-                cyl_half_len = ((v.length_mm or 0) / 2) / vs
-                # Vector from center to each voxel
-                dz = zz - center_voxel[0]
-                dy = yy - center_voxel[1]
-                dx = xx - center_voxel[2]
-                # Project along axis
-                proj = dz * axis[0] + dy * axis[1] + dx * axis[2]
-                # Perpendicular distance
-                perp2 = dz**2 + dy**2 + dx**2 - proj**2
-                mask = (perp2 <= cyl_r**2) & (np.abs(proj) <= cyl_half_len)
-
-            else:
-                # Lattice voids or fallback: use sphere approximation
-                dist2 = (
-                    (zz - center_voxel[0]) ** 2
-                    + (yy - center_voxel[1]) ** 2
-                    + (xx - center_voxel[2]) ** 2
-                )
-                r_vox = v.radius_mm / vs
-                mask = dist2 <= r_vox ** 2
-
+            z1 = z0 + mask.shape[0]
+            y1 = y0 + mask.shape[1]
+            x1 = x0 + mask.shape[2]
             labels[z0:z1, y0:y1, x0:x1][mask] = v.id
 
         return labels
@@ -10615,104 +10800,147 @@ class StructureModifier:
     # =========================================================================
     # Manual Geometric Modifiers
     # =========================================================================
+
+    def _world_to_voxel(self, points: np.ndarray) -> np.ndarray:
+        """Convert world-space points (mm) to voxel-space coordinates."""
+        return (np.asarray(points, dtype=np.float64) - self.grid.origin) / float(self.grid.voxel_size)
+
+    def _prepare_local_grid(
+        self,
+        min_corner_v: np.ndarray,
+        max_corner_v: np.ndarray,
+    ) -> Optional[Tuple[Tuple[slice, slice, slice], Tuple[np.ndarray, np.ndarray, np.ndarray]]]:
+        """
+        Build a clipped local voxel grid for an axis-aligned bounding box in voxel space.
+
+        Returns:
+            ((sl_x, sl_y, sl_z), (X, Y, Z)) or None if the box is empty/outside volume.
+        """
+        eps = 1e-9
+        grid_shape = np.asarray(self.grid.shape, dtype=np.int64)
+        min_v = np.floor(np.asarray(min_corner_v, dtype=np.float64) - eps).astype(np.int64)
+        max_v = np.ceil(np.asarray(max_corner_v, dtype=np.float64) + eps).astype(np.int64) + 1
+
+        min_v = np.clip(min_v, 0, grid_shape)
+        max_v = np.clip(max_v, 0, grid_shape)
+
+        if np.any(min_v >= max_v):
+            return None
+
+        sl_x = slice(int(min_v[0]), int(max_v[0]))
+        sl_y = slice(int(min_v[1]), int(max_v[1]))
+        sl_z = slice(int(min_v[2]), int(max_v[2]))
+
+        x = np.arange(min_v[0], max_v[0], dtype=np.float64)
+        y = np.arange(min_v[1], max_v[1], dtype=np.float64)
+        z = np.arange(min_v[2], max_v[2], dtype=np.float64)
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        return (sl_x, sl_y, sl_z), (X, Y, Z)
+
+    def _apply_void_mask(
+        self,
+        slices_xyz: Tuple[slice, slice, slice],
+        inside_mask: np.ndarray,
+        work_mask: Optional[np.ndarray] = None,
+    ) -> None:
+        """Apply boolean inside-mask to carve voids, optionally restricted by work mask."""
+        if work_mask is not None:
+            inside_mask = inside_mask & work_mask[slices_xyz]
+        self.grid.data[slices_xyz][inside_mask] = 0.0
+
+    def _add_sphere_void_impl(
+        self,
+        center: Tuple[float, float, float],
+        radius: float,
+        work_mask: Optional[np.ndarray] = None,
+    ) -> VoxelGrid:
+        center_v = self._world_to_voxel(center)
+        radius_v = float(radius) / float(self.grid.voxel_size)
+        if radius_v <= 0.0:
+            return self.grid
+
+        local = self._prepare_local_grid(center_v - radius_v, center_v + radius_v)
+        if local is None:
+            return self.grid
+        slices_xyz, (X, Y, Z) = local
+
+        dist_sq = (X - center_v[0]) ** 2 + (Y - center_v[1]) ** 2 + (Z - center_v[2]) ** 2
+        inside = dist_sq <= radius_v ** 2
+        self._apply_void_mask(slices_xyz, inside, work_mask)
+        return self.grid
+
+    def _add_cylinder_void_impl(
+        self,
+        start: Tuple[float, float, float],
+        end: Tuple[float, float, float],
+        radius: float,
+        work_mask: Optional[np.ndarray] = None,
+    ) -> VoxelGrid:
+        start_v = self._world_to_voxel(start)
+        end_v = self._world_to_voxel(end)
+        radius_v = float(radius) / float(self.grid.voxel_size)
+        if radius_v <= 0.0:
+            return self.grid
+
+        axis = end_v - start_v
+        length_sq = float(np.dot(axis, axis))
+        if length_sq < 1e-9:
+            return self.grid
+        length = np.sqrt(length_sq)
+        axis_u = axis / length
+
+        min_corner = np.minimum(start_v, end_v) - radius_v
+        max_corner = np.maximum(start_v, end_v) + radius_v
+        local = self._prepare_local_grid(min_corner, max_corner)
+        if local is None:
+            return self.grid
+        slices_xyz, (X, Y, Z) = local
+
+        vx, vy, vz = X - start_v[0], Y - start_v[1], Z - start_v[2]
+        proj = vx * axis_u[0] + vy * axis_u[1] + vz * axis_u[2]
+        v_sq = vx ** 2 + vy ** 2 + vz ** 2
+        perp_dist_sq = v_sq - proj ** 2
+
+        inside = (perp_dist_sq <= radius_v ** 2) & (proj >= 0.0) & (proj <= length)
+        self._apply_void_mask(slices_xyz, inside, work_mask)
+        return self.grid
+
+    def _add_ellipsoid_void_impl(
+        self,
+        center: Tuple[float, float, float],
+        radii: Tuple[float, float, float],
+        work_mask: Optional[np.ndarray] = None,
+    ) -> VoxelGrid:
+        center_v = self._world_to_voxel(center)
+        radii_v = np.asarray(radii, dtype=np.float64) / float(self.grid.voxel_size)
+        if np.any(radii_v <= 0.0):
+            return self.grid
+
+        local = self._prepare_local_grid(center_v - radii_v, center_v + radii_v)
+        if local is None:
+            return self.grid
+        slices_xyz, (X, Y, Z) = local
+
+        norm_dist_sq = (
+            ((X - center_v[0]) / radii_v[0]) ** 2 +
+            ((Y - center_v[1]) / radii_v[1]) ** 2 +
+            ((Z - center_v[2]) / radii_v[2]) ** 2
+        )
+        inside = norm_dist_sq <= 1.0
+        self._apply_void_mask(slices_xyz, inside, work_mask)
+        return self.grid
     
     def add_sphere_void(self, center: Tuple[float, float, float], radius: float) -> VoxelGrid:
         """Add a spherical void (optimized with bounding box)."""
-        center = np.asarray(center)
-        voxel_size = self.grid.voxel_size
-        
-        center_v = (center - self.grid.origin) / voxel_size
-        radius_v = radius / voxel_size
-        
-        min_v = np.floor(center_v - radius_v).astype(int)
-        max_v = np.ceil(center_v + radius_v).astype(int) + 1
-        min_v = np.maximum(min_v, 0)
-        max_v = np.minimum(max_v, self.grid.shape)
-        
-        if np.any(min_v >= max_v): return self.grid
-        
-        sl_x, sl_y, sl_z = slice(min_v[0], max_v[0]), slice(min_v[1], max_v[1]), slice(min_v[2], max_v[2])
-        
-        x = np.arange(min_v[0], max_v[0])
-        y = np.arange(min_v[1], max_v[1])
-        z = np.arange(min_v[2], max_v[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        
-        dist_sq = (X - center_v[0])**2 + (Y - center_v[1])**2 + (Z - center_v[2])**2
-        mask = dist_sq <= radius_v**2
-        self.grid.data[sl_x, sl_y, sl_z][mask] = 0.0
-        
-        return self.grid
+        return self._add_sphere_void_impl(center, radius, work_mask=None)
     
     def add_cylinder_void(self, start: Tuple[float, float, float], end: Tuple[float, float, float], radius: float) -> VoxelGrid:
         """Add a cylindrical void (optimized with bounding box)."""
-        start = np.asarray(start)
-        end = np.asarray(end)
-        voxel_size = self.grid.voxel_size
-        
-        start_v = (start - self.grid.origin) / voxel_size
-        end_v = (end - self.grid.origin) / voxel_size
-        radius_v = radius / voxel_size
-        
-        axis = end_v - start_v
-        length_sq = np.dot(axis, axis)
-        if length_sq < 1e-9: return self.grid
-        length = np.sqrt(length_sq)
-        axis_u = axis / length
-        
-        min_p = np.minimum(start_v, end_v) - radius_v
-        max_p = np.maximum(start_v, end_v) + radius_v
-        min_v = np.floor(min_p).astype(int)
-        max_v = np.ceil(max_p).astype(int) + 1
-        min_v = np.maximum(min_v, 0)
-        max_v = np.minimum(max_v, self.grid.shape)
-        
-        if np.any(min_v >= max_v): return self.grid
-        
-        sl_x, sl_y, sl_z = slice(min_v[0], max_v[0]), slice(min_v[1], max_v[1]), slice(min_v[2], max_v[2])
-        
-        x, y, z = np.arange(min_v[0], max_v[0]), np.arange(min_v[1], max_v[1]), np.arange(min_v[2], max_v[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        
-        vx, vy, vz = X - start_v[0], Y - start_v[1], Z - start_v[2]
-        proj = vx * axis_u[0] + vy * axis_u[1] + vz * axis_u[2]
-        v_sq = vx**2 + vy**2 + vz**2
-        perp_dist_sq = v_sq - proj**2
-        
-        inside = (perp_dist_sq <= radius_v**2) & (proj >= 0) & (proj <= length)
-        self.grid.data[sl_x, sl_y, sl_z][inside] = 0.0
-        
-        return self.grid
+        return self._add_cylinder_void_impl(start, end, radius, work_mask=None)
     
     def add_ellipsoid_void(self, center: Tuple[float, float, float], radii: Tuple[float, float, float]) -> VoxelGrid:
         """Add an ellipsoidal void (optimized)."""
-        center = np.asarray(center)
-        radii = np.asarray(radii)
-        
-        center_v = (center - self.grid.origin) / self.grid.voxel_size
-        radii_v = radii / self.grid.voxel_size
-        
-        min_v = np.floor(center_v - radii_v).astype(int)
-        max_v = np.ceil(center_v + radii_v).astype(int) + 1
-        min_v = np.maximum(min_v, 0)
-        max_v = np.minimum(max_v, self.grid.shape)
-        
-        if np.any(min_v >= max_v): return self.grid
-        
-        sl_x, sl_y, sl_z = slice(min_v[0], max_v[0]), slice(min_v[1], max_v[1]), slice(min_v[2], max_v[2])
-        
-        x, y, z = np.arange(min_v[0], max_v[0]), np.arange(min_v[1], max_v[1]), np.arange(min_v[2], max_v[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        
-        norm_dist_sq = (
-            ((X - center_v[0]) / radii_v[0])**2 +
-            ((Y - center_v[1]) / radii_v[1])**2 +
-            ((Z - center_v[2]) / radii_v[2])**2
-        )
-        
-        self.grid.data[sl_x, sl_y, sl_z][norm_dist_sq <= 1.0] = 0.0
-        
-        return self.grid
+        return self._add_ellipsoid_void_impl(center, radii, work_mask=None)
 
     # =========================================================================
     # Masked Void Methods (for Shell Preservation)
@@ -10720,111 +10948,15 @@ class StructureModifier:
     
     def _add_sphere_void_masked(self, center: Tuple[float, float, float], radius: float, work_mask: Optional[np.ndarray] = None) -> VoxelGrid:
         """Add spherical void, optionally respecting work_mask."""
-        if work_mask is None:
-            return self.add_sphere_void(center, radius)
-        
-        center = np.asarray(center)
-        voxel_size = self.grid.voxel_size
-        
-        center_v = (center - self.grid.origin) / voxel_size
-        radius_v = radius / voxel_size
-        
-        min_v = np.floor(center_v - radius_v).astype(int)
-        max_v = np.ceil(center_v + radius_v).astype(int) + 1
-        min_v = np.maximum(min_v, 0)
-        max_v = np.minimum(max_v, self.grid.shape)
-        
-        if np.any(min_v >= max_v): return self.grid
-        
-        sl_x, sl_y, sl_z = slice(min_v[0], max_v[0]), slice(min_v[1], max_v[1]), slice(min_v[2], max_v[2])
-        
-        x = np.arange(min_v[0], max_v[0])
-        y = np.arange(min_v[1], max_v[1])
-        z = np.arange(min_v[2], max_v[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        
-        dist_sq = (X - center_v[0])**2 + (Y - center_v[1])**2 + (Z - center_v[2])**2
-        void_mask = (dist_sq <= radius_v**2) & work_mask[sl_x, sl_y, sl_z]
-        
-        self.grid.data[sl_x, sl_y, sl_z][void_mask] = 0.0
-        return self.grid
+        return self._add_sphere_void_impl(center, radius, work_mask=work_mask)
     
     def _add_cylinder_void_masked(self, start: Tuple[float, float, float], end: Tuple[float, float, float], radius: float, work_mask: Optional[np.ndarray] = None) -> VoxelGrid:
         """Add cylindrical void, optionally respecting work_mask."""
-        if work_mask is None:
-            return self.add_cylinder_void(start, end, radius)
-        
-        start = np.asarray(start)
-        end = np.asarray(end)
-        voxel_size = self.grid.voxel_size
-        
-        start_v = (start - self.grid.origin) / voxel_size
-        end_v = (end - self.grid.origin) / voxel_size
-        radius_v = radius / voxel_size
-        
-        axis = end_v - start_v
-        length_sq = np.dot(axis, axis)
-        if length_sq < 1e-9: return self.grid
-        length = np.sqrt(length_sq)
-        axis_u = axis / length
-        
-        min_p = np.minimum(start_v, end_v) - radius_v
-        max_p = np.maximum(start_v, end_v) + radius_v
-        min_v = np.floor(min_p).astype(int)
-        max_v = np.ceil(max_p).astype(int) + 1
-        min_v = np.maximum(min_v, 0)
-        max_v = np.minimum(max_v, self.grid.shape)
-        
-        if np.any(min_v >= max_v): return self.grid
-        
-        sl_x, sl_y, sl_z = slice(min_v[0], max_v[0]), slice(min_v[1], max_v[1]), slice(min_v[2], max_v[2])
-        
-        x, y, z = np.arange(min_v[0], max_v[0]), np.arange(min_v[1], max_v[1]), np.arange(min_v[2], max_v[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        
-        vx, vy, vz = X - start_v[0], Y - start_v[1], Z - start_v[2]
-        proj = vx * axis_u[0] + vy * axis_u[1] + vz * axis_u[2]
-        v_sq = vx**2 + vy**2 + vz**2
-        perp_dist_sq = v_sq - proj**2
-        
-        inside = (perp_dist_sq <= radius_v**2) & (proj >= 0) & (proj <= length)
-        void_mask = inside & work_mask[sl_x, sl_y, sl_z]
-        
-        self.grid.data[sl_x, sl_y, sl_z][void_mask] = 0.0
-        return self.grid
+        return self._add_cylinder_void_impl(start, end, radius, work_mask=work_mask)
     
     def _add_ellipsoid_void_masked(self, center: Tuple[float, float, float], radii: Tuple[float, float, float], work_mask: Optional[np.ndarray] = None) -> VoxelGrid:
         """Add ellipsoidal void, optionally respecting work_mask."""
-        if work_mask is None:
-            return self.add_ellipsoid_void(center, radii)
-        
-        center = np.asarray(center)
-        radii = np.asarray(radii)
-        
-        center_v = (center - self.grid.origin) / self.grid.voxel_size
-        radii_v = radii / self.grid.voxel_size
-        
-        min_v = np.floor(center_v - radii_v).astype(int)
-        max_v = np.ceil(center_v + radii_v).astype(int) + 1
-        min_v = np.maximum(min_v, 0)
-        max_v = np.minimum(max_v, self.grid.shape)
-        
-        if np.any(min_v >= max_v): return self.grid
-        
-        sl_x, sl_y, sl_z = slice(min_v[0], max_v[0]), slice(min_v[1], max_v[1]), slice(min_v[2], max_v[2])
-        
-        x, y, z = np.arange(min_v[0], max_v[0]), np.arange(min_v[1], max_v[1]), np.arange(min_v[2], max_v[2])
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        
-        norm_dist_sq = (
-            ((X - center_v[0]) / radii_v[0])**2 +
-            ((Y - center_v[1]) / radii_v[1])**2 +
-            ((Z - center_v[2]) / radii_v[2])**2
-        )
-        
-        void_mask = (norm_dist_sq <= 1.0) & work_mask[sl_x, sl_y, sl_z]
-        self.grid.data[sl_x, sl_y, sl_z][void_mask] = 0.0
-        return self.grid
+        return self._add_ellipsoid_void_impl(center, radii, work_mask=work_mask)
 
     # =========================================================================
     # Grid Pattern
@@ -10961,6 +11093,8 @@ try:
 except ImportError:
     trimesh = None
 
+from .volume_viewer import VolumeViewer
+
 
 class MeshViewer(QWidget):
     """3D viewer for STL meshes and CT volumes."""
@@ -10968,8 +11102,7 @@ class MeshViewer(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
-        self._mesh = None
-        self._ct_volume = None
+        self._viewer_state = VolumeViewer()
         self._plotter = None
         
         self._setup_ui()
@@ -11079,7 +11212,7 @@ class MeshViewer(QWidget):
         if not HAS_PYVISTA or self._plotter is None:
             return
         
-        self._mesh = mesh
+        self._viewer_state.set_mesh(mesh)
         
         # Clear previous actors
         self._plotter.clear()
@@ -11102,7 +11235,7 @@ class MeshViewer(QWidget):
         self._plotter.add_mesh(
             pv_mesh,
             color='#D0D0D0',  # Light gray
-            show_edges=self._edges_check.isChecked(),
+            show_edges=self._viewer_state.show_edges,
             edge_color='#666666',
             lighting=True,
             smooth_shading=True,
@@ -11128,7 +11261,7 @@ class MeshViewer(QWidget):
         if not HAS_PYVISTA or self._plotter is None:
             return
         
-        self._ct_volume = ct_data
+        self._viewer_state.set_volume(ct_data, voxel_size=voxel_size, threshold=threshold)
         
         # Clear previous actors
         self._plotter.clear()
@@ -11174,26 +11307,17 @@ class MeshViewer(QWidget):
         """Handle view preset change."""
         if self._plotter is None:
             return
-        
-        # Define view vectors as numeric arrays (x, y, z)
-        views = {
-            "Isometric": (1, 1, 1),      # Isometric view
-            "Front": (0, -1, 0),         # Looking from front (negative Y)
-            "Back": (0, 1, 0),           # Looking from back (positive Y)
-            "Left": (-1, 0, 0),          # Looking from left (negative X)
-            "Right": (1, 0, 0),          # Looking from right (positive X)
-            "Top": (0, 0, 1),            # Looking from top (positive Z)
-            "Bottom": (0, 0, -1)         # Looking from bottom (negative Z)
-        }
-        
-        if view_name in views:
-            self._plotter.view_vector(views[view_name])
-            self._plotter.reset_camera()
+
+        preset = self._viewer_state.set_view(view_name)
+        vector = preset.get("vector", (1.0, 1.0, 1.0))
+        self._plotter.view_vector(vector)
+        self._plotter.reset_camera()
     
     def _on_edges_toggled(self, state: int) -> None:
         """Handle edge visibility toggle."""
-        if self._mesh is not None:
-            self.set_mesh(self._mesh)
+        self._viewer_state.set_edges_visible(state != 0)
+        if self._viewer_state.mesh is not None:
+            self.set_mesh(self._viewer_state.mesh)
     
     def _on_reset_view(self) -> None:
         """Reset camera to default isometric view."""
@@ -11206,8 +11330,7 @@ class MeshViewer(QWidget):
         if self._plotter is not None:
             self._plotter.clear()
             self._plotter.add_axes()
-        self._mesh = None
-        self._ct_volume = None
+        self._viewer_state.clear()
 
 
 --- FILE: .\visualization\slice_viewer.py ---
@@ -11222,13 +11345,14 @@ from typing import Optional
 import numpy as np
 
 
-# Window presets for attenuation-value viewing
+# Window presets for attenuation-value viewing.
 WINDOW_PRESETS = {
-    "Low Density": {"center": -0.5, "width": 1.0},
-    "Water Ref": {"center": 0.0, "width": 1.0},
-    "Dense Material": {"center": 0.8, "width": 2.0},
-    "Metal": {"center": 1.5, "width": 2.5},
-    "Custom": {"center": 0.0, "width": 2.0},
+    "Low Density": {"center": 0.03, "width": 0.10},
+    "Water / Soft": {"center": 0.20, "width": 0.30},
+    "Bone / Light Metal": {"center": 0.70, "width": 1.20},
+    "Dense Metal": {"center": 3.00, "width": 6.00},
+    "High-Z Metal": {"center": 40.00, "width": 100.00},
+    "Custom": {"center": 0.20, "width": 0.40},
 }
 
 
@@ -11243,8 +11367,8 @@ class SliceViewer:
     def __init__(self):
         self._volume: Optional[np.ndarray] = None
         self._current_slice: int = 0
-        self._window_center: float = 0.0
-        self._window_width: float = 2.0
+        self._window_center: float = 0.20
+        self._window_width: float = 0.40
     
     def set_volume(self, volume: np.ndarray) -> None:
         """
@@ -11264,8 +11388,8 @@ class SliceViewer:
     
     def set_window(self, center: float, width: float) -> None:
         """Set window center and width for display."""
-        self._window_center = center
-        self._window_width = max(1.0, width)
+        self._window_center = float(center)
+        self._window_width = max(1e-6, float(width))
     
     def get_windowed_slice(self) -> Optional[np.ndarray]:
         """
@@ -11330,13 +11454,13 @@ class VolumeViewer:
     
     # View presets mapping names to camera positions
     VIEW_PRESETS = {
-        "Isometric": {"azimuth": 45, "elevation": 30},
-        "Front": {"azimuth": 0, "elevation": 0},
-        "Back": {"azimuth": 180, "elevation": 0},
-        "Left": {"azimuth": -90, "elevation": 0},
-        "Right": {"azimuth": 90, "elevation": 0},
-        "Top": {"azimuth": 0, "elevation": 90},
-        "Bottom": {"azimuth": 0, "elevation": -90},
+        "Isometric": {"vector": (1.0, 1.0, 1.0)},
+        "Front": {"vector": (0.0, -1.0, 0.0)},
+        "Back": {"vector": (0.0, 1.0, 0.0)},
+        "Left": {"vector": (-1.0, 0.0, 0.0)},
+        "Right": {"vector": (1.0, 0.0, 0.0)},
+        "Top": {"vector": (0.0, 0.0, 1.0)},
+        "Bottom": {"vector": (0.0, 0.0, -1.0)},
     }
     
     def __init__(self):
@@ -11355,7 +11479,8 @@ class VolumeViewer:
             mesh: Mesh object (trimesh.Trimesh or similar)
         """
         self._mesh = mesh
-        self._volume_data = None
+        if mesh is not None:
+            self._volume_data = None
     
     def set_volume(
         self, 
@@ -11372,11 +11497,12 @@ class VolumeViewer:
             threshold: Isosurface threshold value
         """
         self._volume_data = data
-        self._voxel_size = voxel_size
-        self._threshold = threshold
-        self._mesh = None
+        self._voxel_size = float(voxel_size)
+        self._threshold = float(threshold)
+        if data is not None:
+            self._mesh = None
     
-    def set_view(self, view_name: str) -> Dict[str, float]:
+    def set_view(self, view_name: str) -> Dict[str, Any]:
         """
         Set the camera view to a preset.
         
@@ -11384,7 +11510,7 @@ class VolumeViewer:
             view_name: Name of the view preset
             
         Returns:
-            Dictionary with azimuth and elevation values
+            Dictionary with view metadata
         """
         if view_name in self.VIEW_PRESETS:
             self._current_view = view_name
@@ -11424,6 +11550,16 @@ class VolumeViewer:
     def show_edges(self) -> bool:
         """Get whether edges should be shown."""
         return self._show_edges
+
+    @property
+    def current_view(self) -> str:
+        """Get the current named view preset."""
+        return self._current_view
+
+    def clear(self) -> None:
+        """Clear all managed visualization state."""
+        self._mesh = None
+        self._volume_data = None
 
 
 --- FILE: .\visualization\__init__.py ---
