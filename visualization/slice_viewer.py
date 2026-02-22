@@ -8,6 +8,8 @@ Extracted from gui/viewer_panel.py for separation of concerns.
 from typing import Optional
 import numpy as np
 
+from core.windowing import window_to_uint
+
 
 # Window presets for attenuation-value viewing.
 WINDOW_PRESETS = {
@@ -66,14 +68,12 @@ class SliceViewer:
             return None
         
         slice_data = self._volume[self._current_slice, :, :]
-        
-        lower = self._window_center - self._window_width / 2
-        upper = self._window_center + self._window_width / 2
-        
-        windowed = np.clip(slice_data, lower, upper)
-        normalized = ((windowed - lower) / (upper - lower) * 255).astype(np.uint8)
-        
-        return normalized
+        return window_to_uint(
+            slice_data,
+            center=self._window_center,
+            width=self._window_width,
+            output_dtype=np.uint8,
+        )
     
     @property
     def num_slices(self) -> int:

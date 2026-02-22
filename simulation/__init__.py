@@ -7,17 +7,23 @@ DICOM export has been moved to exporters.dicom.
 """
 
 from .voxelizer import Voxelizer, VoxelGrid
-from .materials import MaterialDatabase, MaterialType, Material
+from .materials import (
+    MaterialDatabase,
+    MaterialType,
+    Material,
+    require_physical_material,
+)
 from .volume import CTVolume
 
 # Physics simulation
 from .physics import (
     PhysicalCTSimulator, 
     PhysicsConfig,
+    PhysicalProcessConfig,
     SpectrumGenerator,
     XRaySpectrum,
 )
-from .simple_simulator import SimpleCTSimulator
+from .simple_simulator import SimpleCTSimulator, SimpleProcessConfig
 
 # Re-export from loaders for backwards compatibility
 from loaders import MeshLoader as STLLoader, MeshInfo
@@ -29,12 +35,15 @@ __all__ = [
     "VoxelGrid",
     "MaterialDatabase",
     "MaterialType",
-    "Material", 
+    "Material",
+    "require_physical_material",
     "CTVolume",
     # Simulators
     "SimpleCTSimulator",
+    "SimpleProcessConfig",
     "PhysicalCTSimulator",
     "PhysicsConfig",
+    "PhysicalProcessConfig",
     "SpectrumGenerator",
     "XRaySpectrum",
 ]

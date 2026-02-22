@@ -12,9 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QThread
 import logging
-import numpy as np
 
-from simulation.voxelizer import Voxelizer, VoxelGrid
 from simulation.structures import StructureModifier
 from .pages.lattice_page import LatticePage
 from .pages.defects_page import DefectsPage
@@ -141,16 +139,60 @@ class StructurePanel(QWidget):
         
         # Data manager signals
         self._data_manager.stl_loaded.connect(self._on_stl_loaded)
+        self._data_manager.voxel_grid_changed.connect(self._on_voxel_grid_changed)
         
         # Structure group toggle
         self._struct_group.toggled.connect(self._on_group_toggled)
 
-    def _on_group_toggled(self, checked):
-        pass
+        # Initial guardrail state
+        self._on_voxel_grid_changed(self._data_manager.voxel_grid)
+        self._on_group_toggled(self._struct_group.isChecked())
 
-    def _on_stl_loaded(self):
+    def _on_group_toggled(self, checked):
+        self._stack.setEnabled(checked)
+        self._btn_lattice.setEnabled(checked)
+        self._btn_defects.setEnabled(checked)
+        self._btn_manual.setEnabled(checked)
+
+        if not checked:
+            self._status_label.setText("Structure generation disabled.")
+            return
+
+        if self._data_manager.voxel_grid is None:
+            self._status_label.setText(
+                "Manual modifiers disabled: voxel grid not ready. "
+                "Grid initialization is performed in background workers only."
+            )
+        else:
+            self._status_label.setText("Structure generation will be applied during simulation.")
+
+    def _on_stl_loaded(self, *_):
         self._set_controls_enabled(True)
         self._modifier = None  # Reset modifier on new STL
+        # New STL invalidates existing voxel grid; manual actions stay blocked
+        # until a background worker produces a fresh grid.
+        self._on_voxel_grid_changed(self._data_manager.voxel_grid)
+
+    def _on_voxel_grid_changed(self, voxel_grid):
+        """
+        Keep modifier/manual-trigger readiness in sync with DataManager state.
+        """
+        if voxel_grid is None:
+            self._modifier = None
+            self._manual_page.set_actions_enabled(
+                False,
+                "Manual structure editing requires a precomputed voxel grid. "
+                "Run simulation (background worker) first.",
+            )
+            self._status_label.setText(
+                "Manual modifiers disabled: voxel grid not ready. "
+                "Grid initialization is performed in background workers only."
+            )
+            return
+
+        self._modifier = StructureModifier(voxel_grid)
+        self._manual_page.set_actions_enabled(True)
+        self._status_label.setText("Structure generation will be applied during simulation.")
 
     def _set_controls_enabled(self, enabled: bool):
         self._struct_group.setEnabled(enabled)
@@ -178,52 +220,40 @@ class StructurePanel(QWidget):
             
         return None  # Manual mode not handled via auto-generation pipeline
 
+    def build_structure_config(self):
+        """
+        Build structure-generation config for orchestration layer.
+        """
+        return self.get_active_config()
+
     def reset_structure(self):
         """Reset structure modifier and voxel grid state."""
         self._modifier = None
+        self._on_voxel_grid_changed(self._data_manager.voxel_grid)
         logging.info("Structure panel reset")
 
     # =========================================================================
     # Manual Modification Handlers
     # =========================================================================
 
-    def _ensure_modifier_sync(self):
-        """Ensure modifier exists for synchronous operations."""
-        if self._modifier is None:
-            if not self._data_manager.has_stl:
-                QMessageBox.warning(self, "No STL", "Please load an STL file first.")
-                return False
-            
-            reply = QMessageBox.question(
-                self, "Initialize Grid?", 
-                "Voxel grid not initialized. Initialize now with default settings (0.5mm)?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                return self._perform_initialization_sync()
-            return False
-        return True
-
-    def _perform_initialization_sync(self):
-        from PySide6.QtWidgets import QApplication
-        mesh = self._data_manager.mesh
-        voxel_size = 0.5 
-        try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            voxelizer = Voxelizer(voxel_size=voxel_size, fill_interior=True)
-            voxel_grid = voxelizer.voxelize(mesh)
-            self._modifier = StructureModifier(voxel_grid)
-            self._data_manager.set_voxel_grid(voxel_grid)
-            logging.info(f"Voxel grid initialized: {voxel_grid.shape}")
-            QApplication.restoreOverrideCursor()
+    def _ensure_modifier_ready(self) -> bool:
+        """
+        Guardrail: never initialize voxel grid on UI thread.
+        """
+        if self._modifier is not None:
             return True
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Error", f"Voxelization failed: {e}")
-            return False
+
+        QMessageBox.warning(
+            self,
+            "Voxel Grid Not Ready",
+            "Manual structure editing is disabled until a voxel grid is available.\n\n"
+            "Run simulation first so grid initialization is performed by a background worker.",
+        )
+        return False
 
     def _on_add_sphere(self, center, radius):
-        if not self._ensure_modifier_sync(): return
+        if not self._ensure_modifier_ready():
+            return
         
         try:
             self._modifier.add_sphere_void(center, radius)
@@ -234,7 +264,8 @@ class StructurePanel(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to add sphere: {e}")
 
     def _on_add_cylinder(self, start, end, radius):
-        if not self._ensure_modifier_sync(): return
+        if not self._ensure_modifier_ready():
+            return
         
         try:
             self._modifier.add_cylinder_void(start, end, radius)

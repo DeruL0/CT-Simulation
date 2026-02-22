@@ -181,6 +181,15 @@ class CompressionPanel(QWidget):
             'downsample_factor': self._downsample_spin.value(),
             'solver_iterations': self._iterations_spin.value(),
         }
+
+    def build_compression_config(self):
+        """
+        Build compression config for orchestration layer.
+        Returns None when compression is disabled.
+        """
+        if not self.is_enabled():
+            return None
+        return self.get_config()
     
     def set_results(self, results: list):
         """

@@ -8,8 +8,9 @@ Extracted from gui/viewer_3d_panel.py for separation of concerns.
 from typing import Optional, Dict, Any
 import numpy as np
 
+from core import BaseVisualizer, ScientificData
 
-class VolumeViewer:
+class VolumeViewer(BaseVisualizer[Any, Any]):
     """
     Framework-agnostic 3D volume viewer.
     
@@ -46,6 +47,38 @@ class VolumeViewer:
         self._mesh = mesh
         if mesh is not None:
             self._volume_data = None
+
+    def set_data(self, data: ScientificData[Any, Any]) -> None:
+        """
+        BaseVisualizer contract entrypoint.
+
+        - If `primary_data` is a CTVolume-like object, render its `.data`
+        - If `primary_data` is a numpy ndarray, render as volume
+        - Otherwise treat payload as mesh-like data
+        """
+        payload = data.primary_data
+        if payload is None:
+            self.clear()
+            return
+
+        threshold = float(data.metadata.get("threshold", 0.0))
+
+        if hasattr(payload, "data") and isinstance(payload.data, np.ndarray):
+            voxel_size = float(
+                data.spatial_info.get(
+                    "voxel_size_mm",
+                    getattr(payload, "voxel_size", 1.0),
+                )
+            )
+            self.set_volume(payload.data, voxel_size=voxel_size, threshold=threshold)
+            return
+
+        if isinstance(payload, np.ndarray):
+            voxel_size = float(data.spatial_info.get("voxel_size_mm", 1.0))
+            self.set_volume(payload, voxel_size=voxel_size, threshold=threshold)
+            return
+
+        self.set_mesh(payload)
     
     def set_volume(
         self, 

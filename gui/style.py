@@ -5,6 +5,8 @@ Provides a clean, professional Qt stylesheet for scientific applications.
 Uses a white background with dark text and subtle accent colors.
 """
 
+from config import DEFAULT_GUI
+
 # Scientific white theme color palette
 COLORS = {
     "background": "#FFFFFF",
@@ -26,12 +28,13 @@ COLORS = {
 }
 
 # Font settings
+_BASE_FONT_SIZE = int(DEFAULT_GUI.font_size)
 FONTS = {
-    "family": "Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif",
-    "size": "10pt",
-    "size_small": "9pt",
-    "size_large": "11pt",
-    "size_header": "12pt",
+    "family": f'"{DEFAULT_GUI.font_family}", Roboto, Helvetica Neue, Arial, sans-serif',
+    "size": f"{_BASE_FONT_SIZE}pt",
+    "size_small": f"{max(8, _BASE_FONT_SIZE - 1)}pt",
+    "size_large": f"{_BASE_FONT_SIZE + 1}pt",
+    "size_header": f"{int(DEFAULT_GUI.header_font_size)}pt",
 }
 
 

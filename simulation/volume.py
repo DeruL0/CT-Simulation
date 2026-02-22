@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Tuple
 import numpy as np
 
+from core.windowing import window_to_uint
+
 
 @dataclass
 class CTVolume:
@@ -55,9 +57,9 @@ class CTVolume:
         Returns:
             uint8 array suitable for display
         """
-        lower = window_center - window_width / 2
-        upper = window_center + window_width / 2
-        
-        windowed = np.clip(self.data, lower, upper)
-        normalized = (windowed - lower) / (upper - lower)
-        return (normalized * 255).astype(np.uint8)
+        return window_to_uint(
+            self.data,
+            center=window_center,
+            width=window_width,
+            output_dtype=np.uint8,
+        )

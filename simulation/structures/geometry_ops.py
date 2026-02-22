@@ -2,7 +2,7 @@
 Low-level voxel geometry operations for structure modifiers.
 """
 
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
@@ -59,6 +59,30 @@ def apply_void_mask(
     grid_data[slices_xyz][inside_mask] = 0.0
 
 
+def _carve_void_in_aabb(
+    grid: VoxelGrid,
+    min_corner_v: np.ndarray,
+    max_corner_v: np.ndarray,
+    inside_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray],
+    work_mask: Optional[np.ndarray] = None,
+) -> VoxelGrid:
+    """
+    Shared local-grid carve pipeline for primitive voids.
+
+    This centralizes:
+    1) local AABB clipping + coordinate mesh generation
+    2) boolean inside-mask application with optional work-mask restriction
+    """
+    local = prepare_local_grid(grid.shape, min_corner_v, max_corner_v)
+    if local is None:
+        return grid
+
+    slices_xyz, (X, Y, Z) = local
+    inside = inside_fn(X, Y, Z)
+    apply_void_mask(grid.data, slices_xyz, inside, work_mask)
+    return grid
+
+
 def add_sphere_void(
     grid: VoxelGrid,
     center: Tuple[float, float, float],
@@ -70,15 +94,17 @@ def add_sphere_void(
     if radius_v <= 0.0:
         return grid
 
-    local = prepare_local_grid(grid.shape, center_v - radius_v, center_v + radius_v)
-    if local is None:
-        return grid
-    slices_xyz, (X, Y, Z) = local
+    def inside_fn(X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
+        dist_sq = (X - center_v[0]) ** 2 + (Y - center_v[1]) ** 2 + (Z - center_v[2]) ** 2
+        return dist_sq <= radius_v ** 2
 
-    dist_sq = (X - center_v[0]) ** 2 + (Y - center_v[1]) ** 2 + (Z - center_v[2]) ** 2
-    inside = dist_sq <= radius_v ** 2
-    apply_void_mask(grid.data, slices_xyz, inside, work_mask)
-    return grid
+    return _carve_void_in_aabb(
+        grid,
+        center_v - radius_v,
+        center_v + radius_v,
+        inside_fn,
+        work_mask,
+    )
 
 
 def add_cylinder_void(
@@ -103,19 +129,15 @@ def add_cylinder_void(
 
     min_corner = np.minimum(start_v, end_v) - radius_v
     max_corner = np.maximum(start_v, end_v) + radius_v
-    local = prepare_local_grid(grid.shape, min_corner, max_corner)
-    if local is None:
-        return grid
-    slices_xyz, (X, Y, Z) = local
 
-    vx, vy, vz = X - start_v[0], Y - start_v[1], Z - start_v[2]
-    proj = vx * axis_u[0] + vy * axis_u[1] + vz * axis_u[2]
-    v_sq = vx ** 2 + vy ** 2 + vz ** 2
-    perp_dist_sq = v_sq - proj ** 2
+    def inside_fn(X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
+        vx, vy, vz = X - start_v[0], Y - start_v[1], Z - start_v[2]
+        proj = vx * axis_u[0] + vy * axis_u[1] + vz * axis_u[2]
+        v_sq = vx ** 2 + vy ** 2 + vz ** 2
+        perp_dist_sq = v_sq - proj ** 2
+        return (perp_dist_sq <= radius_v ** 2) & (proj >= 0.0) & (proj <= length)
 
-    inside = (perp_dist_sq <= radius_v ** 2) & (proj >= 0.0) & (proj <= length)
-    apply_void_mask(grid.data, slices_xyz, inside, work_mask)
-    return grid
+    return _carve_void_in_aabb(grid, min_corner, max_corner, inside_fn, work_mask)
 
 
 def add_ellipsoid_void(
@@ -129,19 +151,21 @@ def add_ellipsoid_void(
     if np.any(radii_v <= 0.0):
         return grid
 
-    local = prepare_local_grid(grid.shape, center_v - radii_v, center_v + radii_v)
-    if local is None:
-        return grid
-    slices_xyz, (X, Y, Z) = local
+    def inside_fn(X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
+        norm_dist_sq = (
+            ((X - center_v[0]) / radii_v[0]) ** 2
+            + ((Y - center_v[1]) / radii_v[1]) ** 2
+            + ((Z - center_v[2]) / radii_v[2]) ** 2
+        )
+        return norm_dist_sq <= 1.0
 
-    norm_dist_sq = (
-        ((X - center_v[0]) / radii_v[0]) ** 2
-        + ((Y - center_v[1]) / radii_v[1]) ** 2
-        + ((Z - center_v[2]) / radii_v[2]) ** 2
+    return _carve_void_in_aabb(
+        grid,
+        center_v - radii_v,
+        center_v + radii_v,
+        inside_fn,
+        work_mask,
     )
-    inside = norm_dist_sq <= 1.0
-    apply_void_mask(grid.data, slices_xyz, inside, work_mask)
-    return grid
 
 
 def apply_grid_pattern(grid: VoxelGrid, spacing_mm: float, thickness_mm: float) -> VoxelGrid:

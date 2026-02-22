@@ -6,15 +6,15 @@ Page for manually adding defects to the structure.
 
 from typing import Tuple
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QGroupBox,
-    QDoubleSpinBox, QPushButton, QSizePolicy
+    QFormLayout, QGroupBox, QPushButton
 )
 
 from PySide6.QtCore import Signal
 from ...utils import create_spinbox
+from .base_settings_page import BaseSettingsPage
 
 
-class ManualPage(QWidget):
+class ManualPage(BaseSettingsPage):
     """
     UI for manually adding geometric voids.
     """
@@ -28,8 +28,7 @@ class ManualPage(QWidget):
         self._setup_ui()
     
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout = self._create_main_layout()
         
         # Sphere void
         sphere_group = QGroupBox("Add Sphere")
@@ -106,10 +105,7 @@ class ManualPage(QWidget):
         
         layout.addWidget(cyl_group)
         
-        # Add stretch
-        layout.addStretch()
-        
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self._finalize_layout(layout)
 
     def _on_sphere_clicked(self):
         center = (
@@ -133,3 +129,18 @@ class ManualPage(QWidget):
         )
         radius = self._cyl_r.value()
         self.add_cylinder.emit(start, end, radius)
+
+    def set_actions_enabled(self, enabled: bool, reason: str = "") -> None:
+        """
+        Enable/disable manual action triggers.
+
+        Args:
+            enabled: Whether add actions are allowed.
+            reason: Optional tooltip explaining why actions are disabled.
+        """
+        self._add_sphere_btn.setEnabled(enabled)
+        self._add_cyl_btn.setEnabled(enabled)
+
+        tooltip = "" if enabled else reason
+        self._add_sphere_btn.setToolTip(tooltip)
+        self._add_cyl_btn.setToolTip(tooltip)

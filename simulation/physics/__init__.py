@@ -10,7 +10,7 @@ Provides realistic X-ray physics simulation including:
 from .spectrum import SpectrumGenerator, XRaySpectrum
 from .attenuation import AttenuationDatabase, get_attenuation
 from .physical_material import PhysicalMaterial, PHYSICAL_MATERIALS
-from .physical_simulator import PhysicalCTSimulator, PhysicsConfig
+from .physical_simulator import PhysicalCTSimulator, PhysicsConfig, PhysicalProcessConfig
 
 __all__ = [
     "SpectrumGenerator",
@@ -21,4 +21,5 @@ __all__ = [
     "PHYSICAL_MATERIALS",
     "PhysicalCTSimulator",
     "PhysicsConfig",
+    "PhysicalProcessConfig",
 ]

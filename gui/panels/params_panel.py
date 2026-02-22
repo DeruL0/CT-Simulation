@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 import math
 
+from simulation.materials import MaterialType
+from ..simulation_config import CTSimulationConfig
 from ..utils import create_spinbox, update_stack_sizing
 
 
@@ -533,3 +535,36 @@ class ParamsPanel(QWidget):
         else:
             self._memory_estimate_label.setText(f"Est. Memory: {memory_gb:.2f} GB")
             self._memory_estimate_label.setStyleSheet("color: #666666;")  # Normal
+
+    def build_simulation_config(
+        self,
+        *,
+        material: MaterialType,
+        structure_config=None,
+        compression_config=None,
+    ) -> CTSimulationConfig:
+        """
+        Build a GUI-agnostic simulation configuration DTO.
+
+        This is the single entrypoint controllers should use to consume
+        simulation settings from the parameter panel.
+        """
+        return CTSimulationConfig(
+            voxel_size=self.voxel_size,
+            fill_interior=self.fill_interior,
+            num_projections=self.num_projections,
+            add_noise=self.add_noise,
+            noise_level=self.noise_level,
+            material=material,
+            fast_mode=self.fast_mode,
+            memory_limit_gb=self.memory_limit_gb,
+            use_gpu=self.use_gpu,
+            physics_mode=self.physics_mode,
+            physics_kvp=self.physics_kvp,
+            physics_tube_current=self.physics_tube_current,
+            physics_filtration=self.physics_filtration,
+            physics_energy_bins=self.physics_energy_bins,
+            physics_exposure_multiplier=self.physics_exposure_multiplier,
+            structure_config=structure_config,
+            compression_config=compression_config,
+        )

@@ -10,9 +10,12 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from core import ScientificData, GPUSimulationTiming, SimulationTimingResult
 from loaders import MeshLoader as STLLoader
+from simulation.materials import MaterialType
 from simulation.voxelizer import Voxelizer, VoxelGrid
-from simulation.simple_simulator import SimpleCTSimulator
+from simulation.volume import CTVolume
+from simulation.simple_simulator import SimpleCTSimulator, SimpleProcessConfig
 from .progress import TaskProgressTracker, get_standard_phases, get_compression_phases
 from .compression_pipeline import run_compression_workflow
 from .export_pipeline import export_volume_or_series
@@ -23,7 +26,7 @@ class LoaderWorker(QThread):
     """Background worker for loading STL files."""
     
     progress = Signal(float)
-    finished = Signal(object)  # Emits STLLoader
+    finished = Signal(object)  # Emits ScientificData
     error = Signal(str)
     
     def __init__(self, filepath: str):
@@ -35,12 +38,14 @@ class LoaderWorker(QThread):
             self.progress.emit(0.0)
             
             loader = STLLoader()
-            loader.load(self.filepath)
+            mesh_data = loader.load(self.filepath)
+            if isinstance(mesh_data.secondary_data, dict):
+                mesh_data.secondary_data["loader"] = loader
             
             self.progress.emit(1.0)
-            self.finished.emit(loader)
+            self.finished.emit(mesh_data)
             
-        except (FileNotFoundError, ValueError, OSError, ImportError, RuntimeError) as e:
+        except (FileNotFoundError, ValueError, TypeError, OSError, ImportError, RuntimeError) as e:
             import traceback
             logging.error(f"Loading error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))
@@ -50,7 +55,7 @@ class SimulationWorker(QThread):
     """Background worker for CT simulation."""
     
     progress = Signal(float)
-    finished = Signal(object, dict, list, object)  # (CTVolume, timing_info, compression_results, annotations)
+    finished = Signal(object, object, list, object)  # (ScientificData[CTVolume], SimulationTimingResult, compression_results, annotations)
     error = Signal(str)
     
     def __init__(
@@ -61,7 +66,7 @@ class SimulationWorker(QThread):
         num_projections: int,
         add_noise: bool,
         noise_level: float,
-        material,
+        material: MaterialType,
         fast_mode: bool,
         memory_limit_gb: float = 2.0,
         use_gpu: bool = False,
@@ -72,11 +77,14 @@ class SimulationWorker(QThread):
         physics_energy_bins: int = 10,
         physics_exposure_multiplier: float = 1.0,
         voxel_grid=None,  # Optional pre-computed VoxelGrid
+        mesh_data: Optional[ScientificData] = None,  # Optional mesh ScientificData input
+        voxel_data: Optional[ScientificData] = None,  # Optional voxel ScientificData input
         structure_config=None,  # Optional (method_name, config) for deferred generation
         compression_config=None  # Optional dict from CompressionPanel.get_config()
     ):
         super().__init__()
         self.mesh = mesh
+        self.mesh_data = mesh_data
         self.voxel_size = voxel_size
         self.fill_interior = fill_interior
         self.num_projections = num_projections
@@ -95,6 +103,8 @@ class SimulationWorker(QThread):
         self.physics_exposure_multiplier = physics_exposure_multiplier
         # Pre-computed voxel grid (from StructurePanel)
         self.voxel_grid = voxel_grid
+        # ScientificData voxel payload
+        self.voxel_data = voxel_data
         # Deferred structure configuration
         self.structure_config = structure_config
         # Compression configuration
@@ -102,16 +112,11 @@ class SimulationWorker(QThread):
     
     def run(self):
         try:
-            timing_info = {
-                'use_gpu': self.use_gpu,
-                'fast_mode': self.fast_mode,
-                'physics_mode': self.physics_mode,
-                'voxelization_time': 0.0,
-                'structure_time': 0.0,
-                'simulation_time': 0.0,
-                'total_time': 0.0,
-                'gpu_timing': None
-            }
+            timing_info = SimulationTimingResult(
+                use_gpu=self.use_gpu,
+                fast_mode=self.fast_mode,
+                physics_mode=self.physics_mode,
+            )
             
             total_start = time.perf_counter()
             
@@ -128,20 +133,31 @@ class SimulationWorker(QThread):
             logging.info("=" * 50)
             logging.info("PHASE 1: Voxelization")
             tracker.start_phase(0)
+
+            mesh = self.mesh
+            if isinstance(self.mesh_data, ScientificData) and self.mesh_data.primary_data is not None:
+                mesh = self.mesh_data.primary_data
+
+            input_voxel_grid = self.voxel_grid
+            if isinstance(self.voxel_data, ScientificData):
+                input_voxel_grid = self.voxel_data.primary_data
+            elif isinstance(self.voxel_data, VoxelGrid):
+                input_voxel_grid = self.voxel_data
             
-            if self.voxel_grid is not None:
+            if input_voxel_grid is not None:
                 # Use pre-computed voxel grid (from StructurePanel)
                 # CLONE it to avoid modifying the version in DataManager (persistent defects)
                 # since StructureModifier works in-place
-                from simulation.voxelizer import VoxelGrid
                 voxel_grid = VoxelGrid(
-                    data=self.voxel_grid.data.copy(),
-                    voxel_size=self.voxel_grid.voxel_size,
-                    origin=self.voxel_grid.origin.copy()
+                    data=input_voxel_grid.data.copy(),
+                    voxel_size=input_voxel_grid.voxel_size,
+                    origin=input_voxel_grid.origin.copy()
                 )
-                timing_info['voxelization_time'] = 0.0
+                timing_info.voxelization_time = 0.0
                 logging.info(f"  Using cloned pre-computed voxel grid: {voxel_grid.shape}")
             else:
+                if mesh is None:
+                    raise ValueError("No mesh or voxel grid provided for simulation.")
                 # Voxelize from mesh
                 vox_start = time.perf_counter()
                 voxelizer = Voxelizer(
@@ -149,9 +165,9 @@ class SimulationWorker(QThread):
                     fill_interior=self.fill_interior,
                     max_memory_gb=self.memory_limit_gb
                 )
-                voxel_grid = voxelizer.voxelize(self.mesh)
-                timing_info['voxelization_time'] = time.perf_counter() - vox_start
-                logging.info(f"  Voxelized: {voxel_grid.shape} in {timing_info['voxelization_time']:.2f}s")
+                voxel_grid = voxelizer.voxelize(mesh)
+                timing_info.voxelization_time = time.perf_counter() - vox_start
+                logging.info(f"  Voxelized: {voxel_grid.shape} in {timing_info.voxelization_time:.2f}s")
             
             tracker.end_phase()  # End voxelization phase
 
@@ -189,8 +205,8 @@ class SimulationWorker(QThread):
                 else:
                     voxel_grid = modifier.grid
                     
-                timing_info['structure_time'] = time.perf_counter() - struct_start
-                logging.info(f"  Structure generation completed in {timing_info['structure_time']:.2f}s")
+                timing_info.structure_time = time.perf_counter() - struct_start
+                logging.info(f"  Structure generation completed in {timing_info.structure_time:.2f}s")
                 if initial_annotations:
                     logging.info(f"  Annotations: {len(initial_annotations.voids)} voids annotated")
                 voxel_grid = modifier.grid
@@ -211,10 +227,28 @@ class SimulationWorker(QThread):
                 if now - last_sim_log[0] > 2.0:
                     logging.info(f"  Simulation progress: {p*100:.1f}%")
                     last_sim_log[0] = now
+
+            sim_input = ScientificData(
+                primary_data=voxel_grid,
+                secondary_data={},
+                spatial_info={
+                    "voxel_size_mm": voxel_grid.voxel_size,
+                    "origin": voxel_grid.origin.copy(),
+                },
+                metadata={"stage": "voxelized"},
+            )
+            if isinstance(self.mesh_data, ScientificData):
+                sim_input.metadata.update(
+                    {k: v for k, v in self.mesh_data.metadata.items() if k not in sim_input.metadata}
+                )
             
             if self.physics_mode:
                 # Use physical simulation with polychromatic physics
-                from simulation.physics import PhysicalCTSimulator, PhysicsConfig
+                from simulation.physics import (
+                    PhysicalCTSimulator,
+                    PhysicsConfig,
+                    PhysicalProcessConfig,
+                )
                 
                 physics_config = PhysicsConfig(
                     kvp=self.physics_kvp,
@@ -230,10 +264,12 @@ class SimulationWorker(QThread):
                     num_projections=self.num_projections
                 )
                 
-                ct_volume = simulator.simulate(
-                    voxel_grid,
-                    material=self.material,
-                    progress_callback=sim_progress
+                ct_result = simulator.process(
+                    sim_input,
+                    PhysicalProcessConfig(
+                        material=self.material,
+                        progress_callback=sim_progress,
+                    ),
                 )
                 
             else:
@@ -243,18 +279,31 @@ class SimulationWorker(QThread):
                     num_projections=self.num_projections,
                     use_gpu=self.use_gpu
                 )
-                ct_volume = simulator.simulate(
-                    voxel_grid,
-                    material=self.material,
-                    progress_callback=sim_progress
+                ct_result = simulator.process(
+                    sim_input,
+                    SimpleProcessConfig(
+                        material=self.material,
+                        progress_callback=sim_progress,
+                    ),
+                )
+
+            ct_volume = ct_result.primary_data
+            if not isinstance(ct_volume, CTVolume):
+                raise TypeError(
+                    "Simulator.process must return ScientificData.primary_data as CTVolume."
                 )
             
-            timing_info['simulation_time'] = time.perf_counter() - sim_start
+            timing_info.simulation_time = time.perf_counter() - sim_start
             tracker.end_phase()  # End CT simulation phase
             
             # Get GPU-specific timing if available
             if hasattr(simulator, '_last_gpu_timing'):
-                timing_info['gpu_timing'] = simulator._last_gpu_timing
+                raw_gpu_timing = getattr(simulator, "_last_gpu_timing")
+                if isinstance(raw_gpu_timing, dict):
+                    try:
+                        timing_info.gpu_timing = GPUSimulationTiming.from_mapping(raw_gpu_timing)
+                    except (TypeError, ValueError):
+                        logging.warning("Failed to parse GPU timing payload: %s", raw_gpu_timing)
             
             # ===== PHASE 3-4: Compression Simulation (only if enabled) =====
             compression_results = []
@@ -274,22 +323,22 @@ class SimulationWorker(QThread):
                     initial_annotations=initial_annotations if self.structure_config else None,
                 )
 
-                timing_info['compression_time'] = compression_elapsed
-                logging.info(f"  Compression + CT: {len(compression_results)} steps in {timing_info['compression_time']:.2f}s")
+                timing_info.compression_time = compression_elapsed
+                logging.info(f"  Compression + CT: {len(compression_results)} steps in {timing_info.compression_time:.2f}s")
             
-            timing_info['total_time'] = time.perf_counter() - total_start
+            timing_info.total_time = time.perf_counter() - total_start
             
             # ===== Summary =====
             logging.info("=" * 50)
             logging.info("TIMING SUMMARY:")
-            logging.info(f"  Voxelization:     {timing_info['voxelization_time']:.2f}s")
-            logging.info(f"  Structure Gen:    {timing_info['structure_time']:.2f}s")
-            logging.info(f"  CT Simulation:    {timing_info['simulation_time']:.2f}s")
-            if timing_info.get('compression_time'):
-                logging.info(f"  Compression:      {timing_info['compression_time']:.2f}s")
-            logging.info(f"  TOTAL:            {timing_info['total_time']:.2f}s")
-            if timing_info.get('gpu_timing'):
-                logging.info(f"  GPU Details: {timing_info['gpu_timing']}")
+            logging.info(f"  Voxelization:     {timing_info.voxelization_time:.2f}s")
+            logging.info(f"  Structure Gen:    {timing_info.structure_time:.2f}s")
+            logging.info(f"  CT Simulation:    {timing_info.simulation_time:.2f}s")
+            if timing_info.compression_time is not None:
+                logging.info(f"  Compression:      {timing_info.compression_time:.2f}s")
+            logging.info(f"  TOTAL:            {timing_info.total_time:.2f}s")
+            if timing_info.gpu_timing is not None:
+                logging.info(f"  GPU Details: {timing_info.gpu_timing}")
             logging.info("=" * 50)
             
             self.progress.emit(1.0)
@@ -297,9 +346,9 @@ class SimulationWorker(QThread):
             annotations_out = None
             if self.structure_config is not None:
                 annotations_out = initial_annotations
-            self.finished.emit(ct_volume, timing_info, compression_results, annotations_out)
+            self.finished.emit(ct_result, timing_info, compression_results, annotations_out)
             
-        except (ValueError, OSError, ImportError, RuntimeError) as e:
+        except (ValueError, TypeError, OSError, ImportError, RuntimeError) as e:
             import traceback
             logging.error(f"Simulation error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))

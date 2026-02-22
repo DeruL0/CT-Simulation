@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Optional, Callable
 import numpy as np
 
+from core.windowing import linear_to_uint, map_window_to_uint_range
+
 try:
     import pydicom
     from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
@@ -38,6 +40,11 @@ class DICOMExporter:
     # Reference water attenuation used for HU conversion:
     # HU = 1000 * (mu / mu_water_ref - 1)
     MU_WATER_REF_CM_INV = 0.171
+
+    @staticmethod
+    def is_available() -> bool:
+        """Whether pydicom runtime dependency is available."""
+        return HAS_PYDICOM
     
     def __init__(
         self,
@@ -145,31 +152,28 @@ class DICOMExporter:
             if window_width <= 0:
                 window_width_export = max(float(np.max(export_values) - np.min(export_values)), 1.0)
             window_explanation = "CT HU"
-            value_min = None
-            value_scale = None
         else:
             # Default: scale mu directly into unitless uint16 grayscale [0, 65535].
             export_values = volume
             mu_min = float(np.min(export_values))
             mu_max = float(np.max(export_values))
-            if mu_max > mu_min:
-                value_scale = 65535.0 / (mu_max - mu_min)
-            else:
-                value_scale = 0.0
-            value_min = mu_min
 
             rescale_slope = 1.0
             rescale_intercept = 0.0
             rescale_type = "US"
 
-            if value_scale > 0.0:
-                window_center_export = (float(window_center) - mu_min) * value_scale
-                window_width_export = max(1.0, float(window_width) * value_scale)
+            if mu_max > mu_min:
+                window_center_export, window_width_export = map_window_to_uint_range(
+                    center=float(window_center),
+                    width=float(window_width),
+                    source_min=mu_min,
+                    source_max=mu_max,
+                    output_dtype=np.uint16,
+                    min_output_width=1.0,
+                )
             else:
                 window_center_export = 32768.0
                 window_width_export = 65535.0
-            window_center_export = float(np.clip(window_center_export, 0.0, 65535.0))
-            window_width_export = float(np.clip(window_width_export, 1.0, 65535.0))
             window_explanation = "Scaled Gray 0-65535"
         
         created_files = []
@@ -181,11 +185,17 @@ class DICOMExporter:
             if self.pixel_value_mode == "hu_u16":
                 stored_values = ((slice_values - rescale_intercept) / rescale_slope)
             else:
-                if value_scale > 0.0:
-                    stored_values = (slice_values - value_min) * value_scale
+                if mu_max > mu_min:
+                    stored_values = linear_to_uint(
+                        slice_values,
+                        lower=mu_min,
+                        upper=mu_max,
+                        output_dtype=np.uint16,
+                    )
                 else:
-                    stored_values = np.zeros_like(slice_values, dtype=np.float64)
-            stored_values = np.clip(stored_values, 0, 65535).astype(np.uint16)
+                    stored_values = np.zeros_like(slice_values, dtype=np.uint16)
+            if self.pixel_value_mode == "hu_u16":
+                stored_values = np.clip(stored_values, 0, 65535).astype(np.uint16)
             
             # Create DICOM dataset
             ds = self._create_dataset(

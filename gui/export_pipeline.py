@@ -26,6 +26,11 @@ def export_volume_or_series(
     Returns:
         Flat list of produced DICOM file paths.
     """
+    if not DICOMExporter.is_available():
+        raise ImportError(
+            "DICOM export requires 'pydicom'. Install it with: pip install pydicom"
+        )
+
     exporter = DICOMExporter()
     all_files: List[str] = []
 

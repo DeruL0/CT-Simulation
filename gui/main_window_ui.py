@@ -17,16 +17,18 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 
+from config import DEFAULT_GUI
 from .panels import LoaderPanel, ParamsPanel, ViewerPanel, CompressionPanel
 from .panels.structure_panel import StructurePanel
+from .simulation_config import SimulationConfigBuilder
 from visualization import MeshViewer
 
 
 def setup_main_window_ui(window) -> None:
     """Build and wire main-window widgets and layout."""
-    window.setWindowTitle("CT Simulation Software")
-    window.setMinimumSize(1200, 800)
-    window.resize(1400, 900)
+    window.setWindowTitle(DEFAULT_GUI.window_title)
+    window.setMinimumSize(*DEFAULT_GUI.min_size)
+    window.resize(*DEFAULT_GUI.window_size)
 
     central = QWidget()
     window.setCentralWidget(central)
@@ -51,6 +53,13 @@ def setup_main_window_ui(window) -> None:
 
     window._compression_panel = CompressionPanel(window._data_manager)
     controls_layout.addWidget(window._compression_panel)
+
+    window._simulation_config_builder = SimulationConfigBuilder(
+        params_panel=window._params_panel,
+        loader_panel=window._loader_panel,
+        structure_panel=window._structure_panel,
+        compression_panel=window._compression_panel,
+    )
 
     actions_group = QGroupBox("Actions")
     actions_layout = QVBoxLayout(actions_group)

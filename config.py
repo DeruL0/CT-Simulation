@@ -5,7 +5,7 @@ Contains constants and default settings for the CT simulation engine.
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 @dataclass
 class VoxelizationConfig:
@@ -48,6 +48,9 @@ class DICOMConfig:
 class GUIConfig:
     """Configuration for GUI appearance."""
     window_title: str = "CT Simulation Software"
+    application_name: str = "CT Simulation Software"
+    application_version: str = "1.0"
+    organization_name: str = "Research"
     window_size: Tuple[int, int] = (1400, 900)
     min_size: Tuple[int, int] = (1000, 700)
     
@@ -62,6 +65,10 @@ class GUIConfig:
     font_family: str = "Segoe UI"
     font_size: int = 10
     header_font_size: int = 12
+
+    # Qt high-DPI rounding policy. Keep None to let Qt/OS negotiate automatically.
+    # Valid values: "PassThrough", "Round", "Ceil", "Floor", "RoundPreferFloor".
+    high_dpi_rounding_policy: Optional[str] = None
 
 
 # Default configurations

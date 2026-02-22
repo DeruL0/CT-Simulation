@@ -9,6 +9,12 @@ from typing import Optional, Tuple
 import logging
 import numpy as np
 
+from core.validation import (
+    require_finite_vector,
+    require_ndarray,
+    require_positive_finite_scalar,
+)
+
 try:
     import trimesh
     HAS_TRIMESH = True
@@ -30,6 +36,31 @@ class VoxelGrid:
     data: np.ndarray  # 3D array, dtype varies by use case
     voxel_size: float  # mm per voxel
     origin: np.ndarray  # (3,) world position of grid[0,0,0]
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """
+        Validate and normalize voxel-grid contracts in one centralized place.
+        """
+        self.data = require_ndarray(
+            self.data,
+            name="VoxelGrid.data",
+            ndim=3,
+            numeric=True,
+            require_c_contiguous=True,
+            coerce_c_contiguous=True,
+        )
+        self.voxel_size = require_positive_finite_scalar(
+            self.voxel_size,
+            name="VoxelGrid.voxel_size",
+        )
+        self.origin = require_finite_vector(
+            self.origin,
+            name="VoxelGrid.origin",
+            length=3,
+        )
     
     @property
     def shape(self) -> Tuple[int, int, int]:

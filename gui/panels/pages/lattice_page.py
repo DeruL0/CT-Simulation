@@ -5,17 +5,16 @@ Page for configuring industrial lattice structure generation parameters.
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, 
-    QComboBox, QDoubleSpinBox, QSpinBox, QSlider, QCheckBox,
-    QSizePolicy
+    QWidget, QHBoxLayout, QComboBox, QSlider, QCheckBox
 )
 from PySide6.QtCore import Qt
 
 from simulation.structures import LatticeType, LatticeConfig
 from ...utils import create_spinbox
+from .base_settings_page import BaseSettingsPage
 
 
-class LatticePage(QWidget):
+class LatticePage(BaseSettingsPage):
     """
     UI for configuring TPMS lattice structures.
     """
@@ -25,12 +24,8 @@ class LatticePage(QWidget):
         self._setup_ui()
     
     def _setup_ui(self):
-        # Main layout
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Form layout for controls
-        form_layout = QFormLayout()
+        main_layout = self._create_main_layout()
+        form_layout = self._create_form_layout()
         
         # Lattice type
         self._lattice_type_combo = QComboBox()
@@ -80,10 +75,7 @@ class LatticePage(QWidget):
         
         main_layout.addLayout(form_layout)
         
-        # Add stretch to push everything up
-        main_layout.addStretch()
-        
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self._finalize_layout(main_layout)
 
     def _on_shell_toggled(self, state):
         self._shell_thickness_spin.setEnabled(state == Qt.Checked.value)

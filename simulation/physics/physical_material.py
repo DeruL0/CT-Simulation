@@ -11,6 +11,7 @@ from ..materials import (
     PHYSICAL_MATERIALS,
     get_physical_material,
     material_type_to_physical,
+    require_physical_material,
 )
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "PHYSICAL_MATERIALS", 
     "get_physical_material",
     "material_type_to_physical",
+    "require_physical_material",
 ]
 

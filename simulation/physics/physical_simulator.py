@@ -8,12 +8,14 @@ Realistic CT simulation with polychromatic X-ray physics including:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Callable
+from typing import Any, Optional, Callable
 import logging
 import time
 import threading
 import concurrent.futures
 import numpy as np
+
+from core import BaseAnalyzer, ScientificData
 
 # Optional CuPy import for GPU acceleration
 try:
@@ -25,10 +27,11 @@ except ImportError:
 
 
 from ..voxelizer import VoxelGrid
-from ..materials import MaterialType, MaterialDatabase
+from ..materials import MaterialType, require_physical_material
+from ..backends.geometry import crop_from_radon_canvas, pad_slice_to_radon_canvas
 from .spectrum import SpectrumGenerator, XRaySpectrum
-from .physical_material import material_type_to_physical
 from ..backends import get_backend
+from ..volume import CTVolume
 
 
 @dataclass
@@ -72,7 +75,27 @@ class PhysicsConfig:
         return self.photon_count_base * current_scale * exposure_scale
 
 
-class PhysicalCTSimulator:
+@dataclass(frozen=True)
+class PhysicalProcessConfig:
+    """
+    Strongly-typed processing parameters for `PhysicalCTSimulator.process`.
+    """
+
+    material: MaterialType = MaterialType.BONE_CORTICAL
+    background: MaterialType = MaterialType.AIR
+    density_scale: float = 1.0
+    progress_callback: Optional[Callable[[float], None]] = None
+
+
+class PhysicalCTSimulator(
+    BaseAnalyzer[
+        VoxelGrid,
+        dict[str, Any],
+        CTVolume,
+        dict[str, Any],
+        PhysicalProcessConfig,
+    ]
+):
     """
     Physical CT simulator with polychromatic X-ray physics.
     
@@ -133,6 +156,78 @@ class PhysicalCTSimulator:
         
         # Initialize backend (defaults to CPU if not using GPU path)
         self._backend = get_backend(use_gpu=False)
+
+    def process(
+        self,
+        data: ScientificData[VoxelGrid, dict[str, Any]],
+        process_config: PhysicalProcessConfig,
+    ) -> ScientificData[CTVolume, dict[str, Any]]:
+        """
+        BaseAnalyzer contract entrypoint.
+
+        Expects `data.primary_data` (or `data.secondary_data["voxel_grid"]`) to be a VoxelGrid.
+        """
+        if not isinstance(process_config, PhysicalProcessConfig):
+            raise TypeError(
+                "PhysicalCTSimulator.process expects PhysicalProcessConfig as process_config."
+            )
+
+        voxel_grid = data.primary_data
+        if not isinstance(voxel_grid, VoxelGrid):
+            secondary = data.secondary_data if isinstance(data.secondary_data, dict) else {}
+            voxel_grid = secondary.get("voxel_grid")
+
+        if not isinstance(voxel_grid, VoxelGrid):
+            raise TypeError(
+                "PhysicalCTSimulator.process expects ScientificData.primary_data "
+                "to be a VoxelGrid."
+            )
+
+        if not isinstance(process_config.material, MaterialType):
+            raise TypeError("PhysicalProcessConfig.material must be a MaterialType.")
+        if not isinstance(process_config.background, MaterialType):
+            raise TypeError("PhysicalProcessConfig.background must be a MaterialType.")
+        if process_config.material == MaterialType.CUSTOM:
+            raise ValueError("PhysicalProcessConfig.material does not support MaterialType.CUSTOM.")
+        if process_config.background == MaterialType.CUSTOM:
+            raise ValueError("PhysicalProcessConfig.background does not support MaterialType.CUSTOM.")
+
+        material = process_config.material
+        background = process_config.background
+        density_scale = float(process_config.density_scale)
+        progress_callback = process_config.progress_callback
+
+        ct_volume = self.simulate(
+            voxel_grid=voxel_grid,
+            material=material,
+            background=background,
+            progress_callback=progress_callback,
+            density_scale=density_scale,
+        )
+
+        output_metadata = dict(data.metadata)
+        output_metadata.update(
+            {
+                "analyzer": "PhysicalCTSimulator",
+                "num_projections": self.num_projections,
+                "kvp": self.config.kvp,
+                "tube_current_ma": self.config.tube_current_ma,
+                "filtration_mm_al": self.config.filtration_mm_al,
+                "energy_bins": self.config.energy_bins,
+                "use_gpu": self.config.use_gpu,
+            }
+        )
+
+        return ScientificData(
+            primary_data=ct_volume,
+            secondary_data={"input_voxel_grid": voxel_grid},
+            spatial_info={
+                "voxel_size_mm": ct_volume.voxel_size,
+                "origin": ct_volume.origin,
+            },
+            metadata=output_metadata,
+        )
+
     def simulate(
         self,
         voxel_grid: VoxelGrid,
@@ -140,7 +235,7 @@ class PhysicalCTSimulator:
         background: MaterialType = MaterialType.AIR,
         progress_callback: Optional[Callable[[float], None]] = None,
         density_scale: float = 1.0,
-    ) -> "CTVolume":
+    ) -> CTVolume:
         """
         Simulate CT scan with physical X-ray model.
         
@@ -155,20 +250,13 @@ class PhysicalCTSimulator:
         Returns:
             CTVolume with reconstructed absolute linear attenuation values (cm^-1)
         """
-        from ..volume import CTVolume
-        
+        voxel_grid.validate()
+
         start_time = time.perf_counter()
         
-        # Get physical materials
-        phys_material = material_type_to_physical(material.value)
-        phys_background = material_type_to_physical(background.value)
-        material_db = MaterialDatabase()
-        
-        if phys_material is None:
-            logging.warning(f"No physics data for {material.value}, using bone_cortical")
-            phys_material = material_db.get_material(MaterialType.BONE_CORTICAL)
-        if phys_background is None:
-            phys_background = material_db.get_material(MaterialType.AIR)
+        # Resolve physical materials through the central domain contract.
+        phys_material = require_physical_material(material)
+        phys_background = require_physical_material(background)
         
         # Prepare energy bins (coarse for speed)
         energy_edges = np.linspace(
@@ -224,7 +312,6 @@ class PhysicalCTSimulator:
                 mu_object=mu_object,
                 mu_background=mu_background,
                 bin_weights=bin_weights,
-                bin_centers=bin_centers,
                 photon_count=self.config.photon_count,
                 voxel_size_mm=voxel_grid.voxel_size,
                 progress_callback=progress_callback
@@ -290,48 +377,11 @@ class PhysicalCTSimulator:
         Output is always square based on the longer edge for consistent CT geometry.
         Returns reconstructed absolute linear attenuation values (cm^-1).
         """
-        from skimage.transform import radon, iradon
-        
-        original_shape = binary_slice.shape
-        
-        # Output will be a square based on the longer edge
-        output_size = max(original_shape[0], original_shape[1])
-        
-        # Pad to diagonal size for proper radon/iradon transform
-        diag_len = int(np.ceil(np.sqrt(output_size**2 + output_size**2))) + 32
-        
-        # First pad to square (output_size x output_size)
-        pad_to_square_h = output_size - original_shape[0]
-        pad_to_square_w = output_size - original_shape[1]
-        sq_pad_top = pad_to_square_h // 2
-        sq_pad_left = pad_to_square_w // 2
-        
-        if pad_to_square_h > 0 or pad_to_square_w > 0:
-            square_slice = np.pad(
-                binary_slice,
-                ((sq_pad_top, pad_to_square_h - sq_pad_top), 
-                 (sq_pad_left, pad_to_square_w - sq_pad_left)),
-                mode='constant',
-                constant_values=0
-            )
-        else:
-            square_slice = binary_slice
-        
-        # Then pad to diagonal for radon transform
-        diag_pad = diag_len - output_size
-        diag_pad_half = diag_pad // 2
-        
-        if diag_pad > 0:
-            padded_slice = np.pad(
-                square_slice,
-                ((diag_pad_half, diag_pad - diag_pad_half), 
-                 (diag_pad_half, diag_pad - diag_pad_half)),
-                mode='constant',
-                constant_values=0
-            )
-        else:
-            padded_slice = square_slice
-            diag_pad_half = 0
+        padded_slice, geometry = pad_slice_to_radon_canvas(
+            binary_slice,
+            xp=np,
+            constant_value=0.0,
+        )
         
         # Calculate path length through material using Radon transform
         # Use CPU backend. Radon outputs path length in voxel units; convert to cm.
@@ -377,16 +427,14 @@ class PhysicalCTSimulator:
         sinogram = -np.log(I_ratio)
         
         # Filtered back projection
-        reconstructed = self._backend.iradon(sinogram, theta=self.theta, output_size=diag_len)
+        reconstructed = self._backend.iradon(
+            sinogram,
+            theta=self.theta,
+            output_size=geometry.diagonal_size,
+        )
+        reconstructed = crop_from_radon_canvas(reconstructed, geometry)
         
-        # Crop back to output_size x output_size (square)
-        if diag_pad > 0:
-            reconstructed = reconstructed[
-                diag_pad_half:diag_pad_half + output_size,
-                diag_pad_half:diag_pad_half + output_size
-            ]
-        
-        return reconstructed.astype(np.float32), output_size
+        return reconstructed.astype(np.float32), geometry.output_size
     
     
     

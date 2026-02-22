@@ -5,16 +5,37 @@ Fast, non-physical CT simulator using Radon/IRadon transforms directly.
 Designed for quick previews without complex physics calculations.
 """
 
-from typing import Optional, Callable
+from dataclasses import dataclass
+from typing import Any, Optional, Callable
 import numpy as np
+
+from core import BaseAnalyzer, ScientificData
 
 from .voxelizer import VoxelGrid
 from .volume import CTVolume
 from .backends import get_backend
-from .materials import MaterialType, material_type_to_physical
+from .materials import MaterialType, require_physical_material
 
 
-class SimpleCTSimulator:
+@dataclass(frozen=True)
+class SimpleProcessConfig:
+    """
+    Strongly-typed processing parameters for `SimpleCTSimulator.process`.
+    """
+
+    material: Optional[MaterialType] = None
+    progress_callback: Optional[Callable[[float], None]] = None
+
+
+class SimpleCTSimulator(
+    BaseAnalyzer[
+        VoxelGrid,
+        dict[str, Any],
+        CTVolume,
+        dict[str, Any],
+        SimpleProcessConfig,
+    ]
+):
     """
     Fast, non-physical CT simulator using Radon/IRadon transforms directly.
     Bypasses complex physics for speed (Fast Mode).
@@ -33,11 +54,69 @@ class SimpleCTSimulator:
         self.num_projections = num_projections
         self.use_gpu = use_gpu
         self.backend = get_backend(use_gpu)
+
+    def process(
+        self,
+        data: ScientificData[VoxelGrid, dict[str, Any]],
+        process_config: SimpleProcessConfig,
+    ) -> ScientificData[CTVolume, dict[str, Any]]:
+        """
+        BaseAnalyzer contract entrypoint.
+
+        Expects `data.primary_data` (or `data.secondary_data["voxel_grid"]`) to be a VoxelGrid.
+        """
+        if not isinstance(process_config, SimpleProcessConfig):
+            raise TypeError(
+                "SimpleCTSimulator.process expects SimpleProcessConfig as process_config."
+            )
+
+        voxel_grid = data.primary_data
+        if not isinstance(voxel_grid, VoxelGrid):
+            secondary = data.secondary_data if isinstance(data.secondary_data, dict) else {}
+            voxel_grid = secondary.get("voxel_grid")
+
+        if not isinstance(voxel_grid, VoxelGrid):
+            raise TypeError(
+                "SimpleCTSimulator.process expects ScientificData.primary_data "
+                "to be a VoxelGrid."
+            )
+
+        if process_config.material is not None and not isinstance(
+            process_config.material, MaterialType
+        ):
+            raise TypeError(
+                "SimpleProcessConfig.material must be MaterialType or None."
+            )
+
+        ct_volume = self.simulate(
+            voxel_grid=voxel_grid,
+            material=process_config.material,
+            progress_callback=process_config.progress_callback,
+        )
+
+        output_metadata = dict(data.metadata)
+        output_metadata.update(
+            {
+                "analyzer": "SimpleCTSimulator",
+                "num_projections": self.num_projections,
+                "use_gpu": self.use_gpu,
+            }
+        )
+
+        return ScientificData(
+            primary_data=ct_volume,
+            secondary_data={"input_voxel_grid": voxel_grid},
+            spatial_info={
+                "voxel_size_mm": ct_volume.voxel_size,
+                "origin": ct_volume.origin,
+            },
+            metadata=output_metadata,
+        )
         
     def simulate(
         self, 
         voxel_grid: VoxelGrid, 
-        material=None, 
+        material: Optional[MaterialType] = None,
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> CTVolume:
         """
@@ -51,6 +130,8 @@ class SimpleCTSimulator:
         Returns:
             CTVolume with reconstructed absolute linear attenuation values
         """
+        voxel_grid.validate()
+
         current_volume = voxel_grid.data.astype(np.float32)
         
         # Projection angles
@@ -107,42 +188,23 @@ class SimpleCTSimulator:
         
         return recon_slice
     
-    def _resolve_reference_mu(self, material) -> float:
+    def _resolve_reference_mu(self, material: Optional[MaterialType]) -> float:
         """Resolve material reference linear attenuation (cm^-1)."""
         default_mu = 0.171  # Approximate water attenuation near 100 keV.
 
         if material is None:
             return default_mu
 
-        if hasattr(material, "linear_attenuation"):
-            try:
-                return float(material.linear_attenuation)
-            except Exception:
-                return default_mu
+        try:
+            return float(require_physical_material(material).linear_attenuation)
+        except (TypeError, ValueError, KeyError):
+            return default_mu
 
-        if isinstance(material, MaterialType):
-            phys = material_type_to_physical(material.value)
-            if phys is not None:
-                return float(phys.linear_attenuation)
-
-        if hasattr(material, "value"):
-            phys = material_type_to_physical(str(material.value))
-            if phys is not None:
-                return float(phys.linear_attenuation)
-
-        if hasattr(material, "name"):
-            mat_name = str(material.name).lower()
-            phys = material_type_to_physical(mat_name)
-            if phys is not None:
-                return float(phys.linear_attenuation)
-
-        phys = material_type_to_physical(str(material).lower())
-        if phys is not None:
-            return float(phys.linear_attenuation)
-
-        return default_mu
-
-    def _scale_to_absolute_mu(self, reconstructed: np.ndarray, material) -> np.ndarray:
+    def _scale_to_absolute_mu(
+        self,
+        reconstructed: np.ndarray,
+        material: Optional[MaterialType],
+    ) -> np.ndarray:
         """Convert normalized reconstruction values to absolute attenuation (cm^-1)."""
         material_mu = self._resolve_reference_mu(material)
 

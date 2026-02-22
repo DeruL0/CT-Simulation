@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal
 
+from core import ScientificData
 from loaders import MeshLoader, MeshInfo, SUPPORTED_EXTENSIONS
 from simulation.materials import MaterialType, MaterialDatabase
 from ..utils import create_spinbox
@@ -25,7 +26,7 @@ class LoaderPanel(QWidget):
     """Panel for 3D mesh file import and material selection."""
     
     # Signal emitted when a new mesh file is loaded
-    stl_loaded = Signal(object)  # Emits the MeshLoader object (keep signal name for compatibility)
+    stl_loaded = Signal(object)  # Emits ScientificData payload (signal name kept for compatibility)
     # Signal emitted when mesh is scaled
     mesh_scaled = Signal(float)  # Emits the scale factor
     
@@ -33,6 +34,7 @@ class LoaderPanel(QWidget):
         super().__init__(parent)
         
         self._loader: Optional[MeshLoader] = None
+        self._mesh_data: Optional[ScientificData] = None
         self._material_db = MaterialDatabase()
         self._setup_ui()
     
@@ -166,7 +168,7 @@ class LoaderPanel(QWidget):
         """
         try:
             self._loader = MeshLoader()
-            self._loader.load(file_path)
+            self._mesh_data = self._loader.load(file_path)
             
             # Update file label
             path = Path(file_path)
@@ -180,11 +182,11 @@ class LoaderPanel(QWidget):
             self._scale_spin.setValue(1.0)
             
             # Emit signal
-            self.stl_loaded.emit(self._loader)
+            self.stl_loaded.emit(self._mesh_data)
             
             return True
             
-        except Exception as e:
+        except (FileNotFoundError, ValueError, OSError, ImportError, RuntimeError) as e:
             self._file_label.setText("Import Failed")
             self._clear_mesh_info()
             
@@ -268,6 +270,11 @@ class LoaderPanel(QWidget):
     def loader(self) -> Optional[MeshLoader]:
         """Get the current mesh loader."""
         return self._loader
+
+    @property
+    def mesh_data(self) -> Optional[ScientificData]:
+        """Get current mesh ScientificData payload."""
+        return self._mesh_data
     
     @property
     def selected_material(self) -> MaterialType:

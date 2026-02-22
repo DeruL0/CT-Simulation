@@ -347,7 +347,6 @@ class GPUSimulator:
         mu_object: np.ndarray,
         mu_background: np.ndarray,
         bin_weights: np.ndarray,
-        bin_centers: np.ndarray,
         photon_count: float,
         voxel_size_mm: float,
         progress_callback: Optional[Callable[[float], None]] = None,
@@ -373,9 +372,6 @@ class GPUSimulator:
         if num_slices == 0:
             return np.zeros((output_size, output_size, 0), dtype=np.float32)
         voxel_size_cm = max(float(voxel_size_mm), 1e-9) / 10.0
-
-        # Keep parameter for compatibility; bin centers are not needed in current integration path.
-        _ = bin_centers
 
         slice_batch, radon_batch, iradon_batch = self._calculate_batch_sizes(output_size)
         volume_data_host, _pinned_handle = self._to_pinned_float32(np.transpose(volume_data, (2, 0, 1)))

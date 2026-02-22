@@ -60,6 +60,39 @@ class MaterialType(Enum):
 
     CUSTOM = "custom"
 
+    @classmethod
+    def parse(
+        cls,
+        value: "MaterialType | str",
+        *,
+        allow_custom: bool = False,
+    ) -> "MaterialType":
+        """
+        Parse external material representation into `MaterialType`.
+
+        This is the domain-level deserialization entrypoint and should be used at
+        I/O boundaries (UI text, config text, persisted payloads), not inside
+        simulation algorithm classes.
+        """
+        if isinstance(value, cls):
+            parsed = value
+        elif isinstance(value, str):
+            text = value.strip().lower()
+            if not text:
+                raise ValueError("Material value must be a non-empty string.")
+            try:
+                parsed = cls(text)
+            except ValueError as exc:
+                raise ValueError(f"Unknown material type: {value!r}") from exc
+        else:
+            raise TypeError(
+                f"Material value must be MaterialType or str, got {type(value).__name__}."
+            )
+
+        if parsed == cls.CUSTOM and not allow_custom:
+            raise ValueError("MaterialType.CUSTOM is not valid in this context.")
+        return parsed
+
 
 @dataclass
 class Material:
@@ -368,21 +401,12 @@ PhysicalMaterial = Material
 
 def _material_type_from_key(material_key: Any) -> Optional[MaterialType]:
     """Resolve a material key to MaterialType, returning None for invalid/custom keys."""
-    if isinstance(material_key, MaterialType):
-        return None if material_key == MaterialType.CUSTOM else material_key
-
     if material_key is None:
         return None
-
-    text = str(material_key).strip().lower()
-    if not text:
-        return None
-
     try:
-        mat_type = MaterialType(text)
-    except ValueError:
+        return MaterialType.parse(material_key, allow_custom=False)
+    except (TypeError, ValueError):
         return None
-    return None if mat_type == MaterialType.CUSTOM else mat_type
 
 
 class _PhysicalMaterialRegistry(Mapping[str, Material]):
@@ -425,3 +449,16 @@ def material_type_to_physical(material_type_value: Any) -> Optional[Material]:
     if mat_type is None:
         return None
     return MaterialDatabase._MATERIALS.get(mat_type)
+
+
+def require_physical_material(material_type: MaterialType) -> Material:
+    """
+    Resolve a strict `MaterialType` to `Material` or raise.
+    """
+    if not isinstance(material_type, MaterialType):
+        raise TypeError(
+            f"material_type must be MaterialType, got {type(material_type).__name__}."
+        )
+    if material_type == MaterialType.CUSTOM:
+        raise ValueError("MaterialType.CUSTOM is not supported by CT simulators.")
+    return MaterialDatabase._MATERIALS[material_type]

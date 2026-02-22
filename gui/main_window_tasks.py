@@ -4,6 +4,7 @@ Simulation and export action handlers for MainWindow.
 
 from PySide6.QtWidgets import QMessageBox, QFileDialog
 
+from core import ScientificData, SimulationTimingResult
 from simulation.volume import CTVolume
 
 from .workers import SimulationWorker, ExportWorker
@@ -11,9 +12,11 @@ from .workers import SimulationWorker, ExportWorker
 
 def start_simulation(window) -> None:
     """Kick off simulation worker for the active mesh/configuration."""
-    stl_loader = window._data_manager.stl_loader
-    if stl_loader is None or stl_loader.mesh is None:
+    mesh_data = window._data_manager.mesh_data
+    if mesh_data is None or mesh_data.primary_data is None:
         return
+
+    sim_config = window._simulation_config_builder.build()
 
     if window._worker is not None and window._worker.isRunning():
         QMessageBox.warning(window, "Task Running", "Please wait for the current task to complete.")
@@ -25,25 +28,26 @@ def start_simulation(window) -> None:
     window._progress_dialog = window._create_progress_dialog("Running CT Simulation...")
 
     window._worker = SimulationWorker(
-        mesh=stl_loader.mesh,
-        voxel_size=window._params_panel.voxel_size,
-        fill_interior=window._params_panel.fill_interior,
-        num_projections=window._params_panel.num_projections,
-        add_noise=window._params_panel.add_noise,
-        noise_level=window._params_panel.noise_level,
-        material=window._loader_panel.selected_material,
-        fast_mode=window._params_panel.fast_mode,
-        memory_limit_gb=window._params_panel.memory_limit_gb,
-        use_gpu=window._params_panel.use_gpu,
-        physics_mode=window._params_panel.physics_mode,
-        physics_kvp=window._params_panel.physics_kvp,
-        physics_tube_current=window._params_panel.physics_tube_current,
-        physics_filtration=window._params_panel.physics_filtration,
-        physics_energy_bins=window._params_panel.physics_energy_bins,
-        physics_exposure_multiplier=window._params_panel.physics_exposure_multiplier,
-        voxel_grid=window._data_manager.voxel_grid,
-        structure_config=window._structure_panel.get_active_config(),
-        compression_config=window._compression_panel.get_config() if window._compression_panel.is_enabled() else None,
+        mesh=mesh_data.primary_data,
+        mesh_data=mesh_data,
+        voxel_size=sim_config.voxel_size,
+        fill_interior=sim_config.fill_interior,
+        num_projections=sim_config.num_projections,
+        add_noise=sim_config.add_noise,
+        noise_level=sim_config.noise_level,
+        material=sim_config.material,
+        fast_mode=sim_config.fast_mode,
+        memory_limit_gb=sim_config.memory_limit_gb,
+        use_gpu=sim_config.use_gpu,
+        physics_mode=sim_config.physics_mode,
+        physics_kvp=sim_config.physics_kvp,
+        physics_tube_current=sim_config.physics_tube_current,
+        physics_filtration=sim_config.physics_filtration,
+        physics_energy_bins=sim_config.physics_energy_bins,
+        physics_exposure_multiplier=sim_config.physics_exposure_multiplier,
+        voxel_data=window._data_manager.voxel_data,
+        structure_config=sim_config.structure_config,
+        compression_config=sim_config.compression_config,
     )
 
     window._worker.progress.connect(window._on_sim_progress)
@@ -52,8 +56,34 @@ def start_simulation(window) -> None:
     window._worker.start()
 
 
-def handle_simulation_finished(window, ct_volume: CTVolume, timing_info: dict, compression_results: list, annotations=None) -> None:
+def handle_simulation_finished(
+    window,
+    ct_result: object,
+    timing_info: SimulationTimingResult,
+    compression_results: list,
+    annotations=None,
+) -> None:
     """Apply completed simulation outputs to UI/data model and show summary dialog."""
+    if isinstance(ct_result, ScientificData):
+        ct_data = ct_result
+        ct_volume = ct_result.primary_data
+    elif isinstance(ct_result, CTVolume):
+        ct_volume = ct_result
+        ct_data = ScientificData(
+            primary_data=ct_volume,
+            secondary_data={},
+            spatial_info={
+                "voxel_size_mm": ct_volume.voxel_size,
+                "origin": ct_volume.origin.copy(),
+            },
+            metadata={"stage": "simulated"},
+        )
+    else:
+        raise TypeError(f"Unsupported simulation result type: {type(ct_result).__name__}")
+
+    if not isinstance(ct_volume, CTVolume):
+        raise TypeError("Simulation result ScientificData.primary_data must be CTVolume.")
+
     window._compression_results = compression_results
     window._initial_annotations = annotations
 
@@ -67,11 +97,23 @@ def handle_simulation_finished(window, ct_volume: CTVolume, timing_info: dict, c
         window._compression_panel.set_results(compression_results)
 
         final_result = compression_results[-1]
-        window._data_manager.set_ct_volume(
-            CTVolume(
-                data=final_result.volume,
-                voxel_size=final_result.voxel_size,
-                origin=ct_volume.origin.copy(),
+        final_ct = CTVolume(
+            data=final_result.volume,
+            voxel_size=final_result.voxel_size,
+            origin=ct_volume.origin.copy(),
+        )
+        window._data_manager.set_ct_data(
+            ScientificData(
+                primary_data=final_ct,
+                secondary_data={
+                    "compression_step": final_result.step_index,
+                    "compression_ratio": final_result.compression_ratio,
+                },
+                spatial_info={
+                    "voxel_size_mm": final_ct.voxel_size,
+                    "origin": final_ct.origin.copy(),
+                },
+                metadata=dict(ct_data.metadata, stage="compression_final"),
             )
         )
         threshold = window._auto_isosurface_threshold(final_result.volume)
@@ -82,7 +124,7 @@ def handle_simulation_finished(window, ct_volume: CTVolume, timing_info: dict, c
         )
         window._status_bar.showMessage(f"Simulation complete with {len(compression_results)} compression steps")
     else:
-        window._data_manager.set_ct_volume(ct_volume)
+        window._data_manager.set_ct_data(ct_data)
         window._viewer_panel.set_volume(ct_volume.data)
         window._compression_panel.clear_results()
 
@@ -96,13 +138,13 @@ def handle_simulation_finished(window, ct_volume: CTVolume, timing_info: dict, c
             f"Simulation complete: {ct_volume.num_slices} slices, {ct_volume.voxel_size:.2f} mm/voxel"
         )
 
-    if timing_info.get("physics_mode"):
+    if timing_info.physics_mode:
         mode_str = "Physics Mode (Polychromatic)"
-    elif timing_info["use_gpu"]:
+    elif timing_info.use_gpu:
         mode_str = "GPU"
     else:
         mode_str = "CPU"
-    if timing_info["fast_mode"]:
+    if timing_info.fast_mode:
         mode_str += " (Fast Mode)"
 
     timing_msg = (
@@ -110,28 +152,30 @@ def handle_simulation_finished(window, ct_volume: CTVolume, timing_info: dict, c
         f"Dimensions: {ct_volume.shape}\n"
         f"Voxel Size: {ct_volume.voxel_size:.2f} mm\n\n"
         f"--- Timing ({mode_str}) ---\n"
-        f"Voxelization: {timing_info['voxelization_time']:.2f}s\n"
-        f"Simulation: {timing_info['simulation_time']:.2f}s\n"
+        f"Voxelization: {timing_info.voxelization_time:.2f}s\n"
+        f"Simulation: {timing_info.simulation_time:.2f}s\n"
     )
 
-    if timing_info.get("compression_time"):
-        timing_msg += f"Compression: {timing_info['compression_time']:.2f}s\n"
-    timing_msg += f"Total: {timing_info['total_time']:.2f}s\n"
+    if timing_info.compression_time is not None:
+        timing_msg += f"Compression: {timing_info.compression_time:.2f}s\n"
+    timing_msg += f"Total: {timing_info.total_time:.2f}s\n"
 
     if compression_results and len(compression_results) > 1:
         timing_msg += "\n--- Compression ---\n"
         timing_msg += f"Steps: {len(compression_results)}\n"
         timing_msg += "Use slider in Compression Panel to view steps.\n"
 
-    if timing_info.get("gpu_timing"):
-        gt = timing_info["gpu_timing"]
+    if timing_info.gpu_timing is not None:
+        gt = timing_info.gpu_timing
+        total = gt.total if gt.total > 0 else 1.0
+        slices = gt.slices if gt.slices > 0 else 1
         timing_msg += (
             "\n--- GPU Details ---\n"
-            f"Transfer to GPU: {gt['transfer_to_gpu']:.2f}s ({gt['transfer_to_gpu']/gt['total']*100:.1f}%)\n"
-            f"Radon: {gt['radon']:.2f}s ({gt['radon']/gt['total']*100:.1f}%)\n"
-            f"IRadon: {gt['iradon']:.2f}s ({gt['iradon']/gt['total']*100:.1f}%)\n"
-            f"Transfer to CPU: {gt['transfer_to_cpu']:.2f}s ({gt['transfer_to_cpu']/gt['total']*100:.1f}%)\n"
-            f"Per-slice: {gt['total']/gt['slices']*1000:.1f}ms"
+            f"Transfer to GPU: {gt.transfer_to_gpu:.2f}s ({gt.transfer_to_gpu/total*100:.1f}%)\n"
+            f"Radon: {gt.radon:.2f}s ({gt.radon/total*100:.1f}%)\n"
+            f"IRadon: {gt.iradon:.2f}s ({gt.iradon/total*100:.1f}%)\n"
+            f"Transfer to CPU: {gt.transfer_to_cpu:.2f}s ({gt.transfer_to_cpu/total*100:.1f}%)\n"
+            f"Per-slice: {gt.total/slices*1000:.1f}ms"
         )
 
     QMessageBox.information(window, "Simulation Complete", timing_msg)

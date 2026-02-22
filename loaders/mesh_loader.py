@@ -7,11 +7,16 @@ for CT simulation. Supports multiple formats via trimesh backend.
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Any, Tuple, Optional
 import numpy as np
 import tempfile
 import hashlib
 import logging
+import os
+import time
+import uuid
+
+from core import BaseLoader, ScientificData
 
 try:
     import trimesh
@@ -53,7 +58,7 @@ class MeshInfo:
         )
 
 
-class MeshLoader:
+class MeshLoader(BaseLoader[Any, dict[str, Any]]):
     """
     Unified loader for 3D mesh files (STL, PLY, OBJ, OFF, GLB, GLTF).
     
@@ -102,6 +107,10 @@ class MeshLoader:
     def is_supported(filepath: str | Path) -> bool:
         """Check if a file extension is supported."""
         return Path(filepath).suffix.lower() in SUPPORTED_EXTENSIONS
+
+    def can_load(self, source: str) -> bool:
+        """Check whether the path extension is supported."""
+        return self.is_supported(source)
     
     @staticmethod
     def _compute_file_hash(filepath: Path) -> str:
@@ -117,6 +126,17 @@ class MeshLoader:
     def _get_cache_path(cache_key: str) -> Path:
         """Get the cache file path for a given key."""
         return _CACHE_DIR / f"{cache_key}.glb"
+
+    @staticmethod
+    def _get_temp_cache_path(cache_key: str) -> Path:
+        """
+        Get a process-safe temporary cache path in the same directory.
+
+        Writing to a sibling temp file and then replacing the target path
+        allows an atomic cache transaction across concurrent processes.
+        """
+        token = uuid.uuid4().hex
+        return _CACHE_DIR / f"{cache_key}.{token}.tmp.glb"
     
     @staticmethod
     def clear_cache() -> int:
@@ -131,6 +151,10 @@ class MeshLoader:
             for cache_file in _CACHE_DIR.glob("*.glb"):
                 cache_file.unlink()
                 count += 1
+            # Best-effort cleanup for interrupted temp transactions.
+            for temp_file in _CACHE_DIR.glob("*.tmp.glb"):
+                temp_file.unlink()
+                count += 1
             logging.info(f"Cleared {count} cached mesh files from {_CACHE_DIR}")
         except OSError as exc:
             logging.warning("Failed to clear cache: %s", exc)
@@ -140,12 +164,47 @@ class MeshLoader:
         """Save current mesh to disk cache."""
         if self.mesh is None or self._cache_key is None:
             return
+        temp_path: Optional[Path] = None
         try:
             cache_path = self._get_cache_path(self._cache_key)
-            self.mesh.export(cache_path, file_type='glb')
+            temp_path = self._get_temp_cache_path(self._cache_key)
+
+            # Transaction step 1: write full payload to a unique temp file.
+            self.mesh.export(temp_path, file_type='glb')
+
+            # Transaction step 2: atomically publish completed file.
+            # On Windows, replace may transiently fail if another process/thread
+            # is touching the same cache path; retry briefly to smooth races.
+            last_exc: Optional[OSError] = None
+            for attempt in range(1, 6):
+                try:
+                    os.replace(temp_path, cache_path)
+                    last_exc = None
+                    break
+                except PermissionError as exc:
+                    last_exc = exc
+                except OSError as exc:
+                    # WinError 5/32/33 => access denied/sharing violation.
+                    if getattr(exc, "winerror", None) in (5, 32, 33):
+                        last_exc = exc
+                    else:
+                        raise
+
+                if attempt < 5:
+                    time.sleep(0.02 * attempt)
+
+            if last_exc is not None:
+                raise last_exc
             logging.info(f"Mesh cached to: {cache_path}")
         except (OSError, ValueError, RuntimeError) as exc:
             logging.warning("Failed to cache mesh: %s", exc)
+        finally:
+            # If transaction failed before replace(), remove orphan temp file.
+            if temp_path is not None and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
     
     def _load_from_cache(self, cache_key: str) -> Optional[trimesh.Trimesh]:
         """Load mesh from disk cache if available."""
@@ -157,7 +216,7 @@ class MeshLoader:
                 mesh = self._ensure_trimesh(mesh)
                 logging.info(f"Mesh loaded from cache: {cache_path}")
                 return mesh
-            except (OSError, ValueError, RuntimeError) as exc:
+            except (OSError, ValueError, RuntimeError, EOFError) as exc:
                 logging.warning("Failed to load from cache: %s", exc)
         return None
     
@@ -199,7 +258,7 @@ class MeshLoader:
         use_cache: bool = True,
         auto_normalize: bool = True,
         target_size_mm: float = 100.0
-    ) -> trimesh.Trimesh:
+    ) -> ScientificData[Any, dict[str, Any]]:
         """
         Load a 3D mesh file.
         
@@ -210,7 +269,7 @@ class MeshLoader:
             target_size_mm: Target max dimension in mm when normalizing (default 100)
             
         Returns:
-            trimesh.Trimesh object
+            ScientificData containing mesh and mesh metadata
             
         Raises:
             FileNotFoundError: If the file doesn't exist
@@ -246,7 +305,7 @@ class MeshLoader:
                 self._filepath = filepath
                 self._compute_info()
                 logging.info("Using cached mesh data.")
-                return self.mesh
+                return self.to_scientific_data(source=filepath)
         
         # Load from file
         logging.info(f"Loading from {self._file_format.upper()} file (not cached)...")
@@ -274,7 +333,62 @@ class MeshLoader:
         if use_cache:
             self._save_to_cache()
         
-        return self.mesh
+        return self.to_scientific_data(source=filepath)
+
+    def load_mesh(
+        self,
+        filepath: str | Path,
+        use_cache: bool = True,
+        auto_normalize: bool = True,
+        target_size_mm: float = 100.0,
+    ):
+        """
+        Backwards-compatible helper that returns raw trimesh.Trimesh.
+        """
+        data = self.load(
+            filepath=filepath,
+            use_cache=use_cache,
+            auto_normalize=auto_normalize,
+            target_size_mm=target_size_mm,
+        )
+        return data.primary_data
+
+    def to_scientific_data(
+        self,
+        source: Optional[str | Path] = None,
+    ) -> ScientificData[Any, dict[str, Any]]:
+        """Package the currently loaded mesh into ScientificData."""
+        if self.mesh is None:
+            raise RuntimeError("No mesh loaded. Call load() first.")
+
+        spatial_info = {}
+        secondary_data = {}
+        if self.info is not None:
+            secondary_data["mesh_info"] = self.info
+            spatial_info = {
+                "bounds_min": self.info.bounds_min.copy(),
+                "bounds_max": self.info.bounds_max.copy(),
+                "dimensions_mm": self.info.dimensions.copy(),
+                "center": self.info.center.copy(),
+            }
+
+        metadata = {
+            "data_kind": "mesh",
+            "file_format": self._file_format,
+        }
+        if self._cache_key:
+            metadata["cache_key"] = self._cache_key
+        if source is not None:
+            metadata["source"] = str(source)
+        elif self._filepath is not None:
+            metadata["source"] = str(self._filepath)
+
+        return ScientificData(
+            primary_data=self.mesh,
+            secondary_data=secondary_data,
+            spatial_info=spatial_info,
+            metadata=metadata,
+        )
     
     def _normalize_mesh(self, target_size_mm: float = 100.0) -> None:
         """

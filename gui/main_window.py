@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtGui import QAction
 
+from core import ScientificData, SimulationTimingResult
 from .main_window_ui import setup_main_window_ui
 from .main_window_tasks import (
     start_simulation,
@@ -168,26 +169,43 @@ class MainWindow(QMainWindow):
         if file_path:
             self._loader_panel.load_stl(file_path)
     
-    def _on_stl_loaded(self, loader: STLLoader) -> None:
+    def _on_stl_loaded(self, payload: object) -> None:
         """Handle STL file loaded."""
-        self._data_manager.set_stl_loader(loader)
+        loader = self._loader_panel.loader
+        mesh_data = None
+
+        if isinstance(payload, ScientificData):
+            mesh_data = payload
+        elif isinstance(payload, STLLoader):
+            loader = payload
+            mesh_data = payload.to_scientific_data(source=payload.filepath)
+        else:
+            self._show_error("Load Error", f"Unsupported load payload type: {type(payload).__name__}")
+            return
+
+        self._data_manager.set_mesh_data(mesh_data, stl_loader=loader)
         self._simulate_btn.setEnabled(True)
         self._reset_stl_btn.setEnabled(True)
         self._compression_results = None
         self._initial_annotations = None
         
         # Display mesh in 3D viewer
-        if loader.mesh is not None:
-            self._viewer_3d_panel.set_mesh(loader.mesh)
+        mesh = self._data_manager.mesh
+        if mesh is not None:
+            self._viewer_3d_panel.set_mesh(mesh)
         
         # Update memory estimation
-        if loader.info is not None:
-            self._params_panel.update_memory_estimate(tuple(loader.info.dimensions), loader.info.num_faces)
+        stl_info = self._data_manager.stl_info
+        if stl_info is not None:
+            self._params_panel.update_memory_estimate(tuple(stl_info.dimensions), stl_info.num_faces)
         
-        self._status_bar.showMessage(
-            f"Loaded: {loader.filepath.name} "
-            f"({loader.info.num_faces:,} faces)"
-        )
+        if loader is not None and loader.filepath is not None and loader.info is not None:
+            self._status_bar.showMessage(
+                f"Loaded: {loader.filepath.name} "
+                f"({loader.info.num_faces:,} faces)"
+            )
+        else:
+            self._status_bar.showMessage("Loaded mesh data")
     
     def _on_mesh_scaled(self, scale_factor: float) -> None:
         """Handle mesh scaling."""
@@ -203,6 +221,10 @@ class MainWindow(QMainWindow):
         # Reset viewers
         stl_loader = self._data_manager.stl_loader
         if stl_loader and stl_loader.mesh:
+            self._data_manager.set_mesh_data(
+                stl_loader.to_scientific_data(source=stl_loader.filepath),
+                stl_loader=stl_loader,
+            )
             self._viewer_3d_panel.set_mesh(stl_loader.mesh)
         
         # Update memory estimate with new dimensions
@@ -231,10 +253,16 @@ class MainWindow(QMainWindow):
         if self._progress_dialog:
             self._progress_dialog.setValue(int(progress * 100))
     
-    @Slot(object, dict, list, object)
-    def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list, annotations=None) -> None:
+    @Slot(object, object, list, object)
+    def _on_sim_finished(
+        self,
+        ct_result: object,
+        timing_info: SimulationTimingResult,
+        compression_results: list,
+        annotations=None,
+    ) -> None:
         """Handle simulation completed."""
-        handle_simulation_finished(self, ct_volume, timing_info, compression_results, annotations)
+        handle_simulation_finished(self, ct_result, timing_info, compression_results, annotations)
     
     @Slot(str)
     def _on_sim_error(self, error_msg: str) -> None:
@@ -314,11 +342,20 @@ class MainWindow(QMainWindow):
         voxel_size = self._data_manager.voxel_grid.voxel_size if self._data_manager.has_voxel_grid else 0.5
         current_ct = self._data_manager.ct_volume
         origin = current_ct.origin.copy() if current_ct is not None else np.zeros(3, dtype=np.float32)
-        self._data_manager.set_ct_volume(
-            CTVolume(
-                data=volume_data,
-                voxel_size=voxel_size,
-                origin=origin,
+        step_ct = CTVolume(
+            data=volume_data,
+            voxel_size=voxel_size,
+            origin=origin,
+        )
+        self._data_manager.set_ct_data(
+            ScientificData(
+                primary_data=step_ct,
+                secondary_data={"compression_step": step_index},
+                spatial_info={
+                    "voxel_size_mm": step_ct.voxel_size,
+                    "origin": step_ct.origin.copy(),
+                },
+                metadata={"stage": "compression_step"},
             )
         )
         threshold = self._auto_isosurface_threshold(volume_data)
