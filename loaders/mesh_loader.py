@@ -132,8 +132,8 @@ class MeshLoader:
                 cache_file.unlink()
                 count += 1
             logging.info(f"Cleared {count} cached mesh files from {_CACHE_DIR}")
-        except Exception as e:
-            logging.warning(f"Failed to clear cache: {e}")
+        except OSError as exc:
+            logging.warning("Failed to clear cache: %s", exc)
         return count
     
     def _save_to_cache(self) -> None:
@@ -144,8 +144,8 @@ class MeshLoader:
             cache_path = self._get_cache_path(self._cache_key)
             self.mesh.export(cache_path, file_type='glb')
             logging.info(f"Mesh cached to: {cache_path}")
-        except Exception as e:
-            logging.warning(f"Failed to cache mesh: {e}")
+        except (OSError, ValueError, RuntimeError) as exc:
+            logging.warning("Failed to cache mesh: %s", exc)
     
     def _load_from_cache(self, cache_key: str) -> Optional[trimesh.Trimesh]:
         """Load mesh from disk cache if available."""
@@ -157,8 +157,8 @@ class MeshLoader:
                 mesh = self._ensure_trimesh(mesh)
                 logging.info(f"Mesh loaded from cache: {cache_path}")
                 return mesh
-            except Exception as e:
-                logging.warning(f"Failed to load from cache: {e}")
+            except (OSError, ValueError, RuntimeError) as exc:
+                logging.warning("Failed to load from cache: %s", exc)
         return None
     
     def _ensure_trimesh(self, mesh_or_scene) -> trimesh.Trimesh:
@@ -253,8 +253,8 @@ class MeshLoader:
         try:
             # trimesh auto-detects format from extension
             self.mesh = trimesh.load(filepath)
-        except Exception as e:
-            raise ValueError(f"Failed to load mesh file: {e}")
+        except (OSError, ValueError, TypeError) as exc:
+            raise ValueError(f"Failed to load mesh file: {exc}") from exc
         
         # Ensure we have a Trimesh, not a Scene
         self.mesh = self._ensure_trimesh(self.mesh)

@@ -155,7 +155,8 @@ python main.py
     
 -   `config.py`: Default configuration and constants.
     
--   `core/`: Base data structures (`ScientificData`) and the centralized `DataManager`.
+-   `core/`: Base data structures and abstract interfaces (`ScientificData`, loaders/analyzers/visualizers).
+-   `gui/data_manager.py`: GUI-layer `DataManager` for shared runtime state/signals.
     
 -   `exporters/`: Contains the `DICOMExporter` for saving simulation results.
     

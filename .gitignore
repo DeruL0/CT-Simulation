@@ -1,0 +1,7 @@
+.idea/workspace.xml
+__pycache__/
+*.py[cod]
+.venv/
+tmp_dicom_mu_test/
+tmp_dicom_mu_test2/
+tmp_dicom_mu_final/

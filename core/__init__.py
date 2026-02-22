@@ -10,13 +10,11 @@ from .base import (
     BaseAnalyzer,
     BaseVisualizer,
 )
-from .data_manager import DataManager
 
 __all__ = [
     'ScientificData',
     'BaseLoader', 
     'BaseAnalyzer',
     'BaseVisualizer',
-    'DataManager',
 ]
 

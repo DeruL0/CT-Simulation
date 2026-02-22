@@ -4,29 +4,27 @@ Main Window
 The main application window for CT Simulation Software.
 """
 
-import logging
-from pathlib import Path
 from typing import Optional
 import numpy as np
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QSplitter, QGroupBox, QPushButton, QLabel,
-    QFileDialog, QProgressBar, QStatusBar, QMenuBar,
-    QMenu, QMessageBox, QApplication, QTabWidget,
-    QScrollArea, QFrame, QDockWidget, QProgressDialog
+    QMainWindow,
+    QFileDialog,
+    QMessageBox,
+    QProgressDialog,
 )
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtGui import QAction
 
-from .style import ScientificStyle
-from .panels import LoaderPanel, ParamsPanel, ViewerPanel, CompressionPanel
-from .panels.structure_panel import StructurePanel
-from .workers import SimulationWorker, ExportWorker
+from .main_window_ui import setup_main_window_ui
+from .main_window_tasks import (
+    start_simulation,
+    handle_simulation_finished,
+    start_export,
+)
 
 from loaders import MeshLoader as STLLoader
 from simulation.volume import CTVolume
-from visualization import MeshViewer
 
 
 class MainWindow(QMainWindow):
@@ -36,7 +34,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         
         # Data management
-        from core.data_manager import DataManager
+        from .data_manager import DataManager
         self._data_manager = DataManager(self)
         
         self._compression_results: Optional[list] = None  # Store list of CompressionResult
@@ -50,110 +48,7 @@ class MainWindow(QMainWindow):
     
     def _setup_ui(self) -> None:
         """Set up the main window UI."""
-        self.setWindowTitle("CT Simulation Software")
-        self.setMinimumSize(1200, 800)
-        self.resize(1400, 900)
-        
-        # Central widget
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
-        
-        # Create splitter for resizable panels
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # Left panel (controls)
-        # Left panel controls container
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(4, 4, 4, 4)  # Add small margin inside scroll area
-        
-        # Loader Panel
-        self._loader_panel = LoaderPanel()
-        controls_layout.addWidget(self._loader_panel)
-        
-        # Parameters Panel
-        self._params_panel = ParamsPanel()
-        controls_layout.addWidget(self._params_panel)
-        
-        # Structure Panel (Industrial/Manual Modifiers)
-        self._structure_panel = StructurePanel(self._data_manager)
-        controls_layout.addWidget(self._structure_panel)
-        
-        # Compression Panel (Physical compression simulation)
-        self._compression_panel = CompressionPanel(self._data_manager)
-        controls_layout.addWidget(self._compression_panel)
-        
-        # Action buttons
-        actions_group = QGroupBox("Actions")
-        actions_layout = QVBoxLayout(actions_group)
-        
-        self._simulate_btn = QPushButton("Run Simulation")
-        self._simulate_btn.setEnabled(False)
-        self._simulate_btn.clicked.connect(self._on_simulate)
-        actions_layout.addWidget(self._simulate_btn)
-        
-        self._export_btn = QPushButton("Export DICOM")
-        self._export_btn.setObjectName("secondaryButton")
-        self._export_btn.setEnabled(False)
-        self._export_btn.clicked.connect(self._on_export)
-        actions_layout.addWidget(self._export_btn)
-
-        self._reset_stl_btn = QPushButton("Reset to STL")
-        self._reset_stl_btn.setObjectName("secondaryButton")
-        self._reset_stl_btn.setEnabled(False)
-        self._reset_stl_btn.clicked.connect(self._on_reset_stl)
-        actions_layout.addWidget(self._reset_stl_btn)
-        
-        controls_layout.addWidget(actions_group)
-        controls_layout.addStretch()
-        
-        # Scroll Area for left panel
-        scroll_area = QScrollArea()
-        scroll_area.setWidget(controls_widget)
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setMinimumWidth(380)  # Wider for structure controls
-        scroll_area.setMaximumWidth(550)
-        
-        splitter.addWidget(scroll_area)
-        
-        # Right panel (viewers in tabs)
-        viewer_tabs = QTabWidget()
-        
-        # 3D Viewer tab
-        self._viewer_3d_panel = MeshViewer()
-        viewer_tabs.addTab(self._viewer_3d_panel, "3D View")
-        
-        # 2D CT Viewer tab
-        self._viewer_panel = ViewerPanel()
-        viewer_tabs.addTab(self._viewer_panel, "2D Slices")
-        
-        splitter.addWidget(viewer_tabs)
-        
-        # Prevent collapsing
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        splitter.setStretchFactor(1, 1)
-        
-        # Set initial splitter sizes
-        splitter.setSizes([420, 980])
-        
-        main_layout.addWidget(splitter)
-        
-        # Status bar
-        self._status_bar = QStatusBar()
-        self.setStatusBar(self._status_bar)
-        
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setMaximumWidth(200)
-        self._progress_bar.setVisible(False)
-        self._status_bar.addPermanentWidget(self._progress_bar)
-        
-        self._status_bar.showMessage("Ready")
+        setup_main_window_ui(self)
     
     def _setup_menu(self) -> None:
         """Set up the menu bar."""
@@ -328,54 +223,7 @@ class MainWindow(QMainWindow):
     
     def _on_simulate(self) -> None:
         """Run CT simulation."""
-        stl_loader = self._data_manager.stl_loader
-        if stl_loader is None or stl_loader.mesh is None:
-            return
-        
-        # Check if a worker is already running
-        if self._worker is not None and self._worker.isRunning():
-            QMessageBox.warning(
-                self,
-                "Task Running",
-                "Please wait for the current task to complete."
-            )
-            return
-        
-        # Disable controls during simulation
-        self._simulate_btn.setEnabled(False)
-        self._export_btn.setEnabled(False)
-        self._status_bar.showMessage("Running simulation...")
-        
-        # Create progress dialog
-        self._progress_dialog = self._create_progress_dialog("Running CT Simulation...")
-        
-        # Create worker
-        self._worker = SimulationWorker(
-            mesh=stl_loader.mesh,
-            voxel_size=self._params_panel.voxel_size,
-            fill_interior=self._params_panel.fill_interior,
-            num_projections=self._params_panel.num_projections,
-            add_noise=self._params_panel.add_noise,
-            noise_level=self._params_panel.noise_level,
-            material=self._loader_panel.selected_material,
-            fast_mode=self._params_panel.fast_mode,
-            memory_limit_gb=self._params_panel.memory_limit_gb,
-            use_gpu=self._params_panel.use_gpu,
-            physics_mode=self._params_panel.physics_mode,
-            physics_kvp=self._params_panel.physics_kvp,
-            physics_tube_current=self._params_panel.physics_tube_current,
-            physics_filtration=self._params_panel.physics_filtration,
-            physics_energy_bins=self._params_panel.physics_energy_bins,
-            physics_exposure_multiplier=self._params_panel.physics_exposure_multiplier,
-            voxel_grid=self._data_manager.voxel_grid,  # Use pre-computed if available
-            structure_config=self._structure_panel.get_active_config(), # Pass active structure config
-            compression_config=self._compression_panel.get_config() if self._compression_panel.is_enabled() else None
-        )
-        
-        self._worker.progress.connect(self._on_sim_progress)
-        self._worker.finished.connect(self._on_sim_finished)
-        self._worker.error.connect(self._on_sim_error)
-        self._worker.start()
+        start_simulation(self)
     
     @Slot(float)
     def _on_sim_progress(self, progress: float) -> None:
@@ -386,108 +234,7 @@ class MainWindow(QMainWindow):
     @Slot(object, dict, list, object)
     def _on_sim_finished(self, ct_volume: CTVolume, timing_info: dict, compression_results: list, annotations=None) -> None:
         """Handle simulation completed."""
-        self._compression_results = compression_results
-        self._initial_annotations = annotations  # Store for export
-        
-        self._close_progress_dialog()
-        
-        self._simulate_btn.setEnabled(True)
-        self._export_btn.setEnabled(True)
-        
-        # Handle compression results if present
-        if compression_results and len(compression_results) > 1:
-            # Set up time-series for both viewers
-            volumes = [r.volume for r in compression_results]
-            self._viewer_panel.set_volume_series(volumes)
-            
-            # Set results in compression panel for slider
-            self._compression_panel.set_results(compression_results)
-            
-            # Display final step in 3D
-            final_result = compression_results[-1]
-            self._data_manager.set_ct_volume(
-                CTVolume(
-                    data=final_result.volume,
-                    voxel_size=final_result.voxel_size,
-                    origin=ct_volume.origin.copy(),
-                )
-            )
-            threshold = self._auto_isosurface_threshold(final_result.volume)
-            self._viewer_3d_panel.set_ct_volume(
-                final_result.volume,
-                final_result.voxel_size,
-                threshold=threshold
-            )
-            
-            self._status_bar.showMessage(
-                f"Simulation complete with {len(compression_results)} compression steps"
-            )
-        else:
-            # No compression - display single volume
-            self._data_manager.set_ct_volume(ct_volume)
-            self._viewer_panel.set_volume(ct_volume.data)
-            self._compression_panel.clear_results()
-            
-            # Update 3D view with CT isosurface
-            threshold = self._auto_isosurface_threshold(ct_volume.data)
-            self._viewer_3d_panel.set_ct_volume(
-                ct_volume.data, 
-                ct_volume.voxel_size, 
-                threshold=threshold
-            )
-            
-            self._status_bar.showMessage(
-                f"Simulation complete: {ct_volume.num_slices} slices, "
-                f"{ct_volume.voxel_size:.2f} mm/voxel"
-            )
-        
-        # Build detailed timing message
-        if timing_info.get('physics_mode'):
-            mode_str = "Physics Mode (Polychromatic)"
-        elif timing_info['use_gpu']:
-            mode_str = "GPU"
-        else:
-            mode_str = "CPU"
-        if timing_info['fast_mode']:
-            mode_str += " (Fast Mode)"
-        
-        timing_msg = (
-            f"Successfully generated CT volume.\n\n"
-            f"Dimensions: {ct_volume.shape}\n"
-            f"Voxel Size: {ct_volume.voxel_size:.2f} mm\n\n"
-            f"--- Timing ({mode_str}) ---\n"
-            f"Voxelization: {timing_info['voxelization_time']:.2f}s\n"
-            f"Simulation: {timing_info['simulation_time']:.2f}s\n"
-        )
-        
-        if timing_info.get('compression_time'):
-            timing_msg += f"Compression: {timing_info['compression_time']:.2f}s\n"
-        
-        timing_msg += f"Total: {timing_info['total_time']:.2f}s\n"
-        
-        # Add compression info
-        if compression_results and len(compression_results) > 1:
-            timing_msg += f"\n--- Compression ---\n"
-            timing_msg += f"Steps: {len(compression_results)}\n"
-            timing_msg += f"Use slider in Compression Panel to view steps.\n"
-        
-        # Add GPU-specific timing breakdown if available
-        if timing_info.get('gpu_timing'):
-            gt = timing_info['gpu_timing']
-            timing_msg += (
-                f"\n--- GPU Details ---\n"
-                f"Transfer to GPU: {gt['transfer_to_gpu']:.2f}s ({gt['transfer_to_gpu']/gt['total']*100:.1f}%)\n"
-                f"Radon: {gt['radon']:.2f}s ({gt['radon']/gt['total']*100:.1f}%)\n"
-                f"IRadon: {gt['iradon']:.2f}s ({gt['iradon']/gt['total']*100:.1f}%)\n"
-                f"Transfer to CPU: {gt['transfer_to_cpu']:.2f}s ({gt['transfer_to_cpu']/gt['total']*100:.1f}%)\n"
-                f"Per-slice: {gt['total']/gt['slices']*1000:.1f}ms"
-            )
-        
-        QMessageBox.information(
-            self,
-            "Simulation Complete",
-            timing_msg
-        )
+        handle_simulation_finished(self, ct_volume, timing_info, compression_results, annotations)
     
     @Slot(str)
     def _on_sim_error(self, error_msg: str) -> None:
@@ -496,60 +243,7 @@ class MainWindow(QMainWindow):
     
     def _on_export(self) -> None:
         """Export CT volume to DICOM."""
-        has_series = bool(self._compression_results and len(self._compression_results) > 1)
-        if not has_series and not self._data_manager.has_ct_volume:
-            QMessageBox.warning(
-                self,
-                "No Data",
-                "Please run a simulation first before exporting."
-            )
-            return
-        
-        # Check if a worker is already running
-        if self._worker is not None and self._worker.isRunning():
-            QMessageBox.warning(
-                self,
-                "Task Running",
-                "Please wait for the current task to complete."
-            )
-            return
-        
-        # Select output directory
-        output_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Directory"
-        )
-        
-        if not output_dir:
-            return
-        
-        # Disable controls during export
-        self._simulate_btn.setEnabled(False)
-        self._export_btn.setEnabled(False)
-        self._status_bar.showMessage("Exporting DICOM...")
-        
-        # Create progress dialog
-        self._progress_dialog = self._create_progress_dialog("Exporting DICOM Series...")
-        
-        # Create worker
-        # Determine what to export: full time series if available, otherwise single volume
-        if self._compression_results and len(self._compression_results) > 1:
-            data_to_export = self._compression_results
-        else:
-            data_to_export = self._data_manager.ct_volume
-
-        self._worker = ExportWorker(
-            volume_or_list=data_to_export,
-            output_dir=output_dir,
-            window_center=self._viewer_panel.window_center,
-            window_width=self._viewer_panel.window_width,
-            initial_annotations=self._initial_annotations,
-        )
-        
-        self._worker.progress.connect(self._on_export_progress)
-        self._worker.finished.connect(self._on_export_finished)
-        self._worker.error.connect(self._on_export_error)
-        self._worker.start()
+        start_export(self)
     
     @Slot(float)
     def _on_export_progress(self, progress: float) -> None:

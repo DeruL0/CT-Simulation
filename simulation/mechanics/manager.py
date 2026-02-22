@@ -1,8 +1,7 @@
 """
 Compression Manager
 
-Orchestrates compression simulation workflow including multi-step time series
-and DICOM export.
+Orchestrates compression simulation workflow for multi-step time series.
 """
 
 import logging
@@ -12,7 +11,7 @@ from typing import Optional, Callable, List, Tuple
 import numpy as np
 
 from .elasticity import ElasticitySolver, ElasticityConfig, apply_displacement_field
-from ..structures.annotations import AnnotationSet, VoidAnnotation
+from ..structures.annotations import AnnotationSet
 
 # GPU support detection
 try:
@@ -39,10 +38,6 @@ class CompressionConfig:
     
     # GPU settings
     warp_chunk_size: int = 64
-    
-    # Output settings
-    output_dir: Optional[Path] = None
-    export_dicom: bool = True
 
 
 @dataclass
@@ -52,14 +47,9 @@ class CompressionResult:
     compression_ratio: float
     _volume: Optional[np.ndarray] = field(default=None, repr=False)
     voxel_size: float = 0.5
-    dicom_path: Optional[Path] = None
     cache_path: Optional[str] = None
     annotations: Optional[AnnotationSet] = None
     density_scale: float = 1.0
-    
-    def __post_init__(self):
-        # Backward compatibility for positional args if needed, though dataclasses handle init
-        pass
 
     @property
     def volume(self) -> np.ndarray:
@@ -93,8 +83,8 @@ class CompressionResult:
         if self.cache_path and Path(self.cache_path).exists():
             try:
                 Path(self.cache_path).unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logging.warning("Failed to remove cached compression step %s: %s", self.cache_path, exc)
             self.cache_path = None
 
 
@@ -105,7 +95,6 @@ class CompressionManager:
     Provides:
     - Multi-step time series compression
     - Physical (elasticity) or geometric (affine) simulation modes
-    - DICOM export for each time step
     """
     
     def __init__(self, use_gpu: bool = True):
@@ -205,7 +194,7 @@ class CompressionManager:
                 )
             else:
                 deformed = self._apply_affine_compression(
-                    current_volume, incremental_ratio, config.poisson_ratio, voxel_size
+                    current_volume, incremental_ratio, config.poisson_ratio
                 )
                 disp_fields = None
             
@@ -248,11 +237,7 @@ class CompressionManager:
             results.append(result)
             
             logging.info(f"Step {step}/{config.num_steps}: compression={step_ratio*100:.1f}%")
-        
-        # Export DICOM if requested
-        if config.export_dicom and config.output_dir:
-            self._export_all_steps(results, config, progress_callback)
-        
+
         if progress_callback:
             progress_callback(1.0, "Simulation complete")
         
@@ -361,7 +346,6 @@ class CompressionManager:
         volume: np.ndarray,
         compression_ratio: float,
         poisson_ratio: float,
-        voxel_size: float
     ) -> np.ndarray:
         """
         Apply simple affine compression (geometric scaling).
@@ -381,85 +365,25 @@ class CompressionManager:
         # Apply zoom (this changes the array size)
         zoomed = sp_ndimage.zoom(volume.astype(np.float32), zoom_factors, order=1)
         
-        # Pad or crop to original size (keep centered)
+        # Centered crop/pad back to original shape.
         result = np.zeros_like(volume)
-        
-        for axis in range(3):
-            orig_size = volume.shape[axis]
-            new_size = zoomed.shape[axis]
-            
-            if new_size > orig_size:
-                # Crop center
-                start = (new_size - orig_size) // 2
-                slices_src = [slice(None)] * 3
-                slices_src[axis] = slice(start, start + orig_size)
-                zoomed = zoomed[tuple(slices_src)]
-            elif new_size < orig_size:
-                # This path is taken for z-axis compression, need to handle padding
-                pass
-        
-        # Final placement
-        result_shape = result.shape
-        zoomed_shape = zoomed.shape
-        
-        # Center the zoomed volume in the result
-        offsets = tuple((r - z) // 2 for r, z in zip(result_shape, zoomed_shape))
-        slices_dst = tuple(slice(o, o + z) for o, z in zip(offsets, zoomed_shape))
-        slices_src = tuple(slice(max(0, -o), z - max(0, o + z - r)) 
-                          for o, z, r in zip(offsets, zoomed_shape, result_shape))
-        
-        # Handle out-of-bounds
-        valid_dst = tuple(slice(max(0, s.start), min(r, s.stop)) 
-                         for s, r in zip(slices_dst, result_shape))
-        valid_src = tuple(slice(s.start + max(0, -o), s.stop + max(0, -o) - s.start + (vd.stop - vd.start)) 
-                         for s, o, vd in zip(slices_src, offsets, valid_dst))
-        
-        try:
-            result[valid_dst] = zoomed[valid_src]
-        except (ValueError, IndexError):
-            # Fallback: simple copy with clipping
-            min_shape = tuple(min(r, z) for r, z in zip(result_shape, zoomed_shape))
-            result[:min_shape[0], :min_shape[1], :min_shape[2]] = \
-                zoomed[:min_shape[0], :min_shape[1], :min_shape[2]]
-        
+        src_slices = []
+        dst_slices = []
+
+        for orig_size, new_size in zip(volume.shape, zoomed.shape):
+            if new_size >= orig_size:
+                src_start = (new_size - orig_size) // 2
+                src_end = src_start + orig_size
+                dst_start = 0
+                dst_end = orig_size
+            else:
+                src_start = 0
+                src_end = new_size
+                dst_start = (orig_size - new_size) // 2
+                dst_end = dst_start + new_size
+
+            src_slices.append(slice(src_start, src_end))
+            dst_slices.append(slice(dst_start, dst_end))
+
+        result[tuple(dst_slices)] = zoomed[tuple(src_slices)]
         return result.astype(volume.dtype)
-    
-    def _export_all_steps(
-        self,
-        results: List[CompressionResult],
-        config: CompressionConfig,
-        progress_callback: Optional[Callable[[float, str], None]] = None
-    ):
-        """Export all steps as DICOM series."""
-        try:
-            from exporters.dicom import DICOMExporter
-            from simulation.volume import CTVolume
-        except ImportError as e:
-            logging.warning(f"Cannot export DICOM: {e}")
-            return
-        
-        output_dir = Path(config.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        for i, result in enumerate(results):
-            step_dir = output_dir / f"Step_{result.step_index:02d}"
-            step_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create CTVolume
-            ct_volume = CTVolume(
-                data=result.volume,
-                voxel_size=result.voxel_size
-            )
-            
-            # Export
-            exporter = DICOMExporter(
-                series_description=f"Compression Step {result.step_index} ({result.compression_ratio*100:.0f}%)"
-            )
-            
-            files = exporter.export(ct_volume, step_dir)
-            result.dicom_path = step_dir
-            
-            logging.info(f"Exported step {result.step_index} to {step_dir}: {len(files)} files")
-            
-            if progress_callback:
-                progress_callback(0.9 + 0.1 * (i + 1) / len(results), f"Exported step {result.step_index}")

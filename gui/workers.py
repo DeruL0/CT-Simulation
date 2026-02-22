@@ -6,19 +6,16 @@ QThread workers for long-running operations (loading, simulation, export).
 
 import logging
 import time
-from pathlib import Path
 from typing import Optional
-import numpy as np
 
 from PySide6.QtCore import QThread, Signal
 
 from loaders import MeshLoader as STLLoader
 from simulation.voxelizer import Voxelizer, VoxelGrid
-from simulation.volume import CTVolume
-from simulation.backends import get_backend
 from simulation.simple_simulator import SimpleCTSimulator
-from exporters.dicom import DICOMExporter
-from .progress import TaskProgressTracker, ProgressPhase, get_standard_phases, get_compression_phases
+from .progress import TaskProgressTracker, get_standard_phases, get_compression_phases
+from .compression_pipeline import run_compression_workflow
+from .export_pipeline import export_volume_or_series
 
 
 
@@ -43,7 +40,7 @@ class LoaderWorker(QThread):
             self.progress.emit(1.0)
             self.finished.emit(loader)
             
-        except Exception as e:
+        except (FileNotFoundError, ValueError, OSError, ImportError, RuntimeError) as e:
             import traceback
             logging.error(f"Loading error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))
@@ -265,99 +262,19 @@ class SimulationWorker(QThread):
                 logging.info("=" * 50)
                 logging.info("PHASE 4: Compression Simulation workflow")
                 tracker.start_phase(3)  # Compression Physics phase
-                comp_start = time.perf_counter()
-                
-                from simulation.mechanics import CompressionManager
-                from simulation.mechanics.manager import CompressionConfig, CompressionResult
-                
-                cfg = self.compression_config
-                # Compression acceleration follows the main simulation GPU setting.
-                manager = CompressionManager(use_gpu=self.use_gpu)
-                
-                comp_config = CompressionConfig(
-                    total_compression=cfg['total_compression'],
-                    num_steps=cfg['num_steps'],
-                    poisson_ratio=cfg['poisson_ratio'],
-                    axis=cfg.get('axis', 'Z'),
-                    use_physics=cfg['mode'] == 'physical',
-                    downsample_factor=cfg.get('downsample_factor', 4),
-                    solver_iterations=cfg.get('solver_iterations', 300),
-                    export_dicom=False
-                )
-                
-                # First, run compression on VOXEL GRID (binary data), not CT volume
-                voxel_data = voxel_grid.data.astype(np.float32)
-                
-                # Get deformed voxel grids for each step
-                phys_cb = tracker.sub_progress(3)
-                def phys_progress(p, s):
-                    phys_cb(p)
-
-                deformed_grids = manager.run_simulation(
-                    voxel_data,
-                    voxel_grid.voxel_size,
-                    comp_config,
-                    progress_callback=phys_progress,
+                compression_results, compression_elapsed = run_compression_workflow(
+                    voxel_grid=voxel_grid,
+                    ct_volume=ct_volume,
+                    simulator=simulator,
+                    physics_mode=self.physics_mode,
+                    material=self.material,
+                    use_gpu=self.use_gpu,
+                    compression_config=self.compression_config,
+                    tracker=tracker,
                     initial_annotations=initial_annotations if self.structure_config else None,
                 )
-                tracker.end_phase()  # End physics phase
-                
-                logging.info(f"  Generated {len(deformed_grids)} compressed voxel grids")
-                
-                # Now run CT simulation for each compressed voxel grid
-                from simulation.voxelizer import VoxelGrid
-                
-                tracker.start_phase(4)  # Batch CT phase
-                num_steps = len(deformed_grids)
-                for i, deform_result in enumerate(deformed_grids):
-                    # Map loop progress within Batch CT phase
-                    step_cb = tracker.sub_range(i / num_steps, (i + 1) / num_steps, 4)
-                    
-                    # OPTIMIZATION: If compression ratio is 0.0 (Step 0), reuse Phase 3 result
-                    # Only valid if Phase 3 ran (which it does) and is uncompressed
-                    if deform_result.compression_ratio == 0.0 and ct_volume is not None:
-                         logging.info(f"  Skipping simulation for Step {i} (0% compression) - reusing initial CT")
-                         step_ct_data = ct_volume.data
-                         step_ct_voxel_size = ct_volume.voxel_size
-                         step_cb(1.0) # Complete progress for this step instantly
-                    else:
-                        logging.info(f"  CT simulation for step {i}/{num_steps-1}...")
-                        
-                        # Create VoxelGrid from deformed data
-                        deformed_grid = VoxelGrid(
-                            data=deform_result.volume,
-                            voxel_size=deform_result.voxel_size,
-                            origin=voxel_grid.origin
-                        )
-                        
-                        # Run CT simulation on this deformed grid
-                        if self.physics_mode:
-                            step_ct = simulator.simulate(
-                                deformed_grid,
-                                material=self.material,
-                                density_scale=getattr(deform_result, 'density_scale', 1.0),
-                                progress_callback=step_cb
-                            )
-                        else:
-                            step_ct = simulator.simulate(
-                                deformed_grid,
-                                material=self.material,
-                                progress_callback=step_cb
-                            )
-                        step_ct_data = step_ct.data
-                        step_ct_voxel_size = step_ct.voxel_size
-                    
-                    # Store as CompressionResult with CT data
-                    compression_results.append(CompressionResult(
-                        step_index=deform_result.step_index,
-                        compression_ratio=deform_result.compression_ratio,
-                        _volume=step_ct_data,  # Use CT simulated data
-                        voxel_size=step_ct_voxel_size,
-                        density_scale=getattr(deform_result, 'density_scale', 1.0),
-                        annotations=deform_result.annotations,
-                    ))
-                
-                timing_info['compression_time'] = time.perf_counter() - comp_start
+
+                timing_info['compression_time'] = compression_elapsed
                 logging.info(f"  Compression + CT: {len(compression_results)} steps in {timing_info['compression_time']:.2f}s")
             
             timing_info['total_time'] = time.perf_counter() - total_start
@@ -382,7 +299,7 @@ class SimulationWorker(QThread):
                 annotations_out = initial_annotations
             self.finished.emit(ct_volume, timing_info, compression_results, annotations_out)
             
-        except Exception as e:
+        except (ValueError, OSError, ImportError, RuntimeError) as e:
             import traceback
             logging.error(f"Simulation error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))
@@ -412,92 +329,17 @@ class ExportWorker(QThread):
     
     def run(self):
         try:
-            exporter = DICOMExporter()
-            all_files = []
-            
-            # Check if input is a list (time series)
-            if isinstance(self.volume_or_list, list):
-                items = self.volume_or_list
-                num_items = len(items)
-                
-                for i, item in enumerate(items):
-                    # Handle both CompressionResult objects and CTVolume/arrays
-                    if hasattr(item, 'volume'):
-                        # It's a CompressionResult
-                        vol_data = item.volume
-                        voxel_size = item.voxel_size
-                        origin = getattr(item, 'origin', np.zeros(3))
-                        step_annotations = getattr(item, 'annotations', None)
-                    elif hasattr(item, 'data'):
-                        # It's a CTVolume
-                        vol_data = item.data
-                        voxel_size = item.voxel_size
-                        origin = item.origin
-                        step_annotations = None
-                    else:
-                        # Assume numpy array
-                        vol_data = item
-                        voxel_size = 0.5  # Default fallback
-                        origin = np.zeros(3)
-                        step_annotations = None
-                        
-                    # Create subdirectory (parents=True for nested paths)
-                    step_dir = Path(self.output_dir) / f"Step_{i:02d}"
-                    step_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    # Create temporary CTVolume wrapper for exporter
-                    from simulation.volume import CTVolume
-                    temp_vol = CTVolume(vol_data, voxel_size, origin)
-                    
-                    # Progress callback for this step - capture i in closure
-                    step_idx = i  # Capture current i
-                    def step_progress(p, idx=step_idx):
-                        # Map 0-1 to global progress
-                        global_p = (idx + p) / num_items
-                        self.progress.emit(global_p)
-                    
-                    files = exporter.export(
-                        temp_vol,
-                        str(step_dir),
-                        window_center=self.window_center,
-                        window_width=self.window_width,
-                        progress_callback=step_progress
-                    )
-                    all_files.extend(files)
-                    
-                    # Save annotations for this step
-                    if step_annotations is not None:
-                        try:
-                            step_annotations.save_json(step_dir / "annotations.json")
-                            step_annotations.save_coco_json(step_dir / "coco_annotations.json")
-                            step_annotations.save_label_volume(step_dir / "labels.npy")
-                        except Exception as ann_err:
-                            logging.warning(f"Failed to save annotations for step {i}: {ann_err}")
-                    
-            else:
-                # Single volume
-                files = exporter.export(
-                    self.volume_or_list,
-                    self.output_dir,
-                    window_center=self.window_center,
-                    window_width=self.window_width,
-                    progress_callback=self.progress.emit
-                )
-                all_files.extend(files)
-                
-                # Save initial annotations for single volume
-                if self.initial_annotations is not None:
-                    try:
-                        out_dir = Path(self.output_dir)
-                        self.initial_annotations.save_json(out_dir / "annotations.json")
-                        self.initial_annotations.save_coco_json(out_dir / "coco_annotations.json")
-                        self.initial_annotations.save_label_volume(out_dir / "labels.npy")
-                    except Exception as ann_err:
-                        logging.warning(f"Failed to save annotations: {ann_err}")
-            
+            all_files = export_volume_or_series(
+                volume_or_list=self.volume_or_list,
+                output_dir=self.output_dir,
+                window_center=self.window_center,
+                window_width=self.window_width,
+                progress_callback=self.progress.emit,
+                initial_annotations=self.initial_annotations,
+            )
             self.finished.emit(all_files)
             
-        except Exception as e:
+        except (ValueError, OSError, ImportError, RuntimeError) as e:
             import traceback
             logging.error(f"Export error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))
@@ -564,7 +406,7 @@ class StructureWorker(QThread):
             self.progress.emit(1.0)
             self.finished.emit(self.modifier.grid, annotations)
             
-        except Exception as e:
+        except (ValueError, OSError, ImportError, RuntimeError) as e:
             import traceback
             logging.error(f"Structure generation error: {e}\n{traceback.format_exc()}")
             self.error.emit(str(e))
