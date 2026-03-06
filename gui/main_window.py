@@ -5,6 +5,7 @@ The main application window for CT Simulation Software.
 """
 
 from typing import Optional
+import logging
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
 )
 from PySide6.QtCore import Qt, QThread, Slot
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QCloseEvent
 
 from core import ScientificData, SimulationTimingResult
 from .main_window_ui import setup_main_window_ui
@@ -40,6 +41,7 @@ class MainWindow(QMainWindow):
         
         self._compression_results: Optional[list] = None  # Store list of CompressionResult
         self._initial_annotations = None  # Store initial AnnotationSet for export
+        self._series_threshold: Optional[float] = None
         self._worker: Optional[QThread] = None
         self._progress_dialog: Optional[QProgressDialog] = None
         
@@ -98,6 +100,8 @@ class MainWindow(QMainWindow):
         
         # Compression panel signals
         self._compression_panel.step_changed.connect(self._on_compression_step_changed)
+        if hasattr(self._viewer_3d_panel, "threshold_changed"):
+            self._viewer_3d_panel.threshold_changed.connect(self._on_3d_threshold_changed)
     
     # ========== Helper Methods ==========
     
@@ -116,6 +120,37 @@ class MainWindow(QMainWindow):
         if self._progress_dialog:
             self._progress_dialog.close()
             self._progress_dialog = None
+
+    def _finalize_worker(self) -> None:
+        """Release finished worker thread objects to avoid shutdown hazards."""
+        worker = self._worker
+        if worker is None:
+            return
+
+        if worker.isRunning():
+            worker.quit()
+            worker.wait(1000)
+
+        worker.deleteLater()
+        self._worker = None
+
+    def _shutdown_worker(self, timeout_ms: int = 5000) -> None:
+        """Stop any running worker before closing the main window."""
+        worker = self._worker
+        if worker is None:
+            return
+
+        if worker.isRunning():
+            logging.info("Stopping background worker before shutdown...")
+            worker.requestInterruption()
+            worker.quit()
+            if not worker.wait(timeout_ms):
+                logging.warning("Worker did not stop in %sms. Forcing terminate().", timeout_ms)
+                worker.terminate()
+                worker.wait(2000)
+
+        worker.deleteLater()
+        self._worker = None
     
     def _show_error(self, title: str, message: str) -> None:
         """Display an error message and restore UI state."""
@@ -188,6 +223,7 @@ class MainWindow(QMainWindow):
         self._reset_stl_btn.setEnabled(True)
         self._compression_results = None
         self._initial_annotations = None
+        self._series_threshold = None
         
         # Display mesh in 3D viewer
         mesh = self._data_manager.mesh
@@ -213,6 +249,7 @@ class MainWindow(QMainWindow):
         self._data_manager.clear_ct_volume()
         self._compression_results = None
         self._initial_annotations = None
+        self._series_threshold = None
         self._data_manager.clear_voxel_grid()
         self._compression_panel.clear_results()
         if hasattr(self, '_structure_panel'):
@@ -262,11 +299,13 @@ class MainWindow(QMainWindow):
         annotations=None,
     ) -> None:
         """Handle simulation completed."""
+        self._finalize_worker()
         handle_simulation_finished(self, ct_result, timing_info, compression_results, annotations)
     
     @Slot(str)
     def _on_sim_error(self, error_msg: str) -> None:
         """Handle simulation error."""
+        self._finalize_worker()
         self._show_error("Simulation Error", error_msg)
     
     def _on_export(self) -> None:
@@ -282,6 +321,7 @@ class MainWindow(QMainWindow):
     @Slot(list)
     def _on_export_finished(self, files: list) -> None:
         """Handle export completed."""
+        self._finalize_worker()
         self._close_progress_dialog()
         
         self._simulate_btn.setEnabled(True)
@@ -300,10 +340,37 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_export_error(self, error_msg: str) -> None:
         """Handle export error."""
+        self._finalize_worker()
         self._show_error("Export Error", error_msg)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Cleanly shutdown worker threads and VTK resources."""
+        self._close_progress_dialog()
+        self._shutdown_worker()
+
+        viewer = getattr(self, "_viewer_3d_panel", None)
+        if viewer is not None and hasattr(viewer, "cleanup"):
+            try:
+                viewer.cleanup()
+            except Exception as exc:
+                logging.warning("3D viewer cleanup failed: %s", exc)
+
+        super().closeEvent(event)
 
     def _on_reset_stl(self) -> None:
         """Reset 3D view to show STL mesh and reset structure."""
+        self._series_threshold = None
+
+        if hasattr(self, "_viewer_panel"):
+            self._viewer_panel.clear_volume_series()
+            self._viewer_panel.reset_window_selection()
+
+        if hasattr(self, "_compression_panel"):
+            self._compression_panel.reset_step_selection()
+
+        if hasattr(self, "_viewer_3d_panel") and hasattr(self._viewer_3d_panel, "reset_display_state"):
+            self._viewer_3d_panel.reset_display_state()
+
         stl_loader = self._data_manager.stl_loader
         if stl_loader is not None and stl_loader.mesh is not None:
             self._viewer_3d_panel.set_mesh(stl_loader.mesh)
@@ -311,8 +378,13 @@ class MainWindow(QMainWindow):
             # Reset structure generation panel as well
             if hasattr(self, '_structure_panel'):
                 self._structure_panel.reset_structure()
-                
+            
             self._status_bar.showMessage("Reset view and structure to original STL")
+
+    @Slot(float)
+    def _on_3d_threshold_changed(self, threshold: float) -> None:
+        """Keep a single threshold value synchronized across 4DCT time steps."""
+        self._series_threshold = float(threshold)
     
     def _on_about(self) -> None:
         """Show about dialog."""
@@ -332,7 +404,7 @@ class MainWindow(QMainWindow):
             "<li>DICOM export with proper metadata</li>"
             "</ul>"
         )
-    
+
     def _on_compression_step_changed(self, step_index: int, volume_data) -> None:
         """Handle compression step slider change - update 3D and 2D viewers."""
         if volume_data is None:
@@ -358,12 +430,11 @@ class MainWindow(QMainWindow):
                 metadata={"stage": "compression_step"},
             )
         )
-        threshold = self._auto_isosurface_threshold(volume_data)
-        
         self._viewer_3d_panel.set_ct_volume(
             volume_data,
             voxel_size,
-            threshold=threshold
+            threshold=self._series_threshold if self._series_threshold is not None else 0.0,
+            preserve_threshold=True,
         )
         
         # Update 2D viewer with the selected step

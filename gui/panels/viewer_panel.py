@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 
+from core.windowing import window_to_uint
 from visualization.slice_viewer import SliceViewer, WINDOW_PRESETS
 
 try:
@@ -34,6 +35,8 @@ class ViewerPanel(QWidget):
         self._slice_viewer = SliceViewer()
         self._volumes: List[np.ndarray] = []  # Time-series volumes
         self._current_step: int = 0
+        self._series_range: Optional[tuple[float, float]] = None
+        self._display_buffer: Optional[np.ndarray] = None
 
         # High-resolution percent mapping for smooth window/level control.
         self._slider_resolution = 100000
@@ -143,6 +146,40 @@ class ViewerPanel(QWidget):
 
         # Default preset; manual adjustment remains freely available.
         self._preset_combo.setCurrentText("Water / Soft")
+
+    @staticmethod
+    def _sample_finite_values(volume: np.ndarray, max_samples: int = 500_000) -> Optional[np.ndarray]:
+        """Return finite values from a volume, downsampled for fast robust stats."""
+        finite = volume[np.isfinite(volume)]
+        if finite.size == 0:
+            return None
+        if finite.size > max_samples:
+            step = max(1, finite.size // max_samples)
+            finite = finite[::step]
+        return finite
+
+    def _estimate_volume_range(self, volume: np.ndarray) -> Optional[tuple[float, float]]:
+        """Estimate value range for one volume."""
+        finite = self._sample_finite_values(volume)
+        if finite is None:
+            return None
+        return float(np.min(finite)), float(np.max(finite))
+
+    def _estimate_series_range(self, volumes: List[np.ndarray]) -> Optional[tuple[float, float]]:
+        """Estimate a shared value range across all time steps in a series."""
+        mins: list[float] = []
+        maxs: list[float] = []
+        for vol in volumes:
+            est = self._estimate_volume_range(vol)
+            if est is None:
+                continue
+            vmin, vmax = est
+            mins.append(vmin)
+            maxs.append(vmax)
+        if not mins:
+            return None
+        return min(mins), max(maxs)
+
     
     def set_volume(self, volume: np.ndarray) -> None:
         """
@@ -168,11 +205,9 @@ class ViewerPanel(QWidget):
         self._slice_slider.blockSignals(False)
         self._slice_spin.blockSignals(False)
 
-        finite_values = volume[np.isfinite(volume)]
-        if finite_values.size > 0:
-            vol_min = float(np.min(finite_values))
-            vol_max = float(np.max(finite_values))
-            self._configure_window_controls(vol_min, vol_max)
+        range_hint = self._estimate_volume_range(volume)
+        if range_hint is not None:
+            self._configure_window_controls(*range_hint)
         
         self._update_display()
 
@@ -328,21 +363,25 @@ class ViewerPanel(QWidget):
             self._preset_combo.blockSignals(False)
         
         self._update_display()
-    
+
     def _update_display(self) -> None:
         """Update the image display."""
         normalized = self._slice_viewer.get_windowed_slice()
         if normalized is None:
             return
+
+        # Keep a contiguous display buffer alive for Qt image backends that may
+        # reference raw memory beyond the scope of this function call.
+        self._display_buffer = np.ascontiguousarray(normalized)
         
         if HAS_PYQTGRAPH:
-            self._image_view.setImage(normalized.T, autoLevels=False, 
+            self._image_view.setImage(self._display_buffer.T, autoLevels=False, 
                                        levels=(0, 255))
         else:
             # Convert to QPixmap for QLabel
-            height, width = normalized.shape
+            height, width = self._display_buffer.shape
             bytes_per_line = width
-            q_image = QImage(normalized.data, width, height, 
+            q_image = QImage(self._display_buffer.data, width, height, 
                            bytes_per_line, QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(q_image)
             scaled = pixmap.scaled(self._image_label.size(), 
@@ -369,9 +408,12 @@ class ViewerPanel(QWidget):
         """
         self._volumes = volumes
         self._current_step = 0
+        self._series_range = self._estimate_series_range(volumes)
         
         if volumes:
             self.set_volume(volumes[0])
+            if self._series_range is not None:
+                self._configure_window_controls(*self._series_range)
     
     def set_current_step(self, step: int) -> None:
         """
@@ -410,16 +452,35 @@ class ViewerPanel(QWidget):
         self._slice_slider.blockSignals(False)
         self._slice_spin.blockSignals(False)
 
-        finite_values = volume[np.isfinite(volume)]
-        if finite_values.size > 0:
-            vol_min = float(np.min(finite_values))
-            vol_max = float(np.max(finite_values))
-            self._configure_window_controls(vol_min, vol_max)
-
         self._update_display()
     
     def clear_volume_series(self) -> None:
         """Clear time-series volumes."""
         self._volumes = []
         self._current_step = 0
+        self._series_range = None
 
+    def reset_window_selection(self) -> None:
+        """
+        Reset clipping/selection controls to default preset state.
+
+        For time-series data, keep one shared control range across all steps.
+        """
+        if self._series_range is not None:
+            self._configure_window_controls(*self._series_range)
+        elif self._slice_viewer.num_slices > 0 and self._slice_viewer.volume is not None:
+            range_hint = self._estimate_volume_range(self._slice_viewer.volume)
+            if range_hint is not None:
+                self._configure_window_controls(*range_hint)
+        else:
+            self._center_min = -1.0
+            self._center_max = 1.0
+            self._width_min = 1e-4
+            self._width_max = 2.0
+            self._set_window_values(0.20, 0.40)
+
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentText("Water / Soft")
+        self._preset_combo.blockSignals(False)
+        self._apply_preset("Water / Soft")
+        self._update_display()

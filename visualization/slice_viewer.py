@@ -94,3 +94,8 @@ class SliceViewer:
     def window_width(self) -> float:
         """Get current window width."""
         return self._window_width
+
+    @property
+    def volume(self) -> Optional[np.ndarray]:
+        """Get current volume reference."""
+        return self._volume

@@ -59,7 +59,8 @@ class CompressionPanel(QWidget):
         # Description
         desc = QLabel(
             "Configure compression parameters.\n"
-            "Compression will be applied after CT simulation."
+            "Compression will be applied after CT simulation.\n"
+            "Force mode converts load into an equivalent compression strain."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #666; font-size: 11px;")
@@ -75,6 +76,14 @@ class CompressionPanel(QWidget):
         self._mode_combo.addItem("Physical (Elasticity)", "physical")
         self._mode_combo.addItem("Geometric (Affine)", "geometric")
         params_layout.addRow("Mode:", self._mode_combo)
+
+        self._drive_combo = QComboBox()
+        self._drive_combo.addItem("Compression Ratio", "ratio")
+        self._drive_combo.addItem("Compression Force", "force")
+        self._drive_combo.setToolTip(
+            "Choose direct strain input or convert force to compression via sigma = F / A and epsilon = sigma / E."
+        )
+        params_layout.addRow("Drive:", self._drive_combo)
         
         # Axis
         self._axis_combo = QComboBox()
@@ -89,7 +98,33 @@ class CompressionPanel(QWidget):
             20.0, 1.0, 50.0, step=1.0, decimals=1, suffix=" %",
             callback=lambda: self.config_changed.emit()
         )
-        params_layout.addRow("Compression:", self._compression_spin)
+        self._compression_label = QLabel("Compression:")
+        params_layout.addRow(self._compression_label, self._compression_spin)
+
+        self._force_spin = create_spinbox(
+            500.0, 0.0, 1_000_000.0, step=10.0, decimals=1, suffix=" N",
+            callback=lambda: self.config_changed.emit()
+        )
+        self._force_spin.setToolTip("Applied compressive force.")
+        self._force_label = QLabel("Force:")
+        params_layout.addRow(self._force_label, self._force_spin)
+
+        self._youngs_spin = create_spinbox(
+            1.0, 0.0001, 5000.0, step=0.1, decimals=4, suffix=" GPa",
+            callback=lambda: self.config_changed.emit()
+        )
+        self._youngs_spin.setToolTip(
+            "Equivalent Young's modulus used to convert applied force into axial strain."
+        )
+        self._youngs_label = QLabel("Young's Modulus:")
+        params_layout.addRow(self._youngs_label, self._youngs_spin)
+
+        self._drive_info = QLabel(
+            "Force mode estimates contact area from the voxel footprint and caps the equivalent strain at 50%."
+        )
+        self._drive_info.setWordWrap(True)
+        self._drive_info.setStyleSheet("color: #666; font-size: 11px;")
+        params_layout.addRow(self._drive_info)
         
         # Steps
         self._steps_spin = create_spinbox(
@@ -151,12 +186,15 @@ class CompressionPanel(QWidget):
         # Mode change handler
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self._on_mode_changed()
+        self._drive_combo.currentIndexChanged.connect(self._on_drive_changed)
+        self._on_drive_changed()
     
     def _connect_signals(self):
         self._step_slider.valueChanged.connect(self._on_step_changed)
         
         # Emit config_changed on any parameter change
         self._mode_combo.currentIndexChanged.connect(lambda: self.config_changed.emit())
+        self._drive_combo.currentIndexChanged.connect(lambda: self.config_changed.emit())
         self._axis_combo.currentIndexChanged.connect(lambda: self.config_changed.emit())
         self._main_group.toggled.connect(lambda: self.config_changed.emit())
     
@@ -164,6 +202,16 @@ class CompressionPanel(QWidget):
         is_physical = self._mode_combo.currentData() == "physical"
         self._downsample_spin.setEnabled(is_physical)
         self._iterations_spin.setEnabled(is_physical)
+
+    def _on_drive_changed(self):
+        use_force = self._drive_combo.currentData() == "force"
+        self._compression_label.setVisible(not use_force)
+        self._compression_spin.setVisible(not use_force)
+        self._force_label.setVisible(use_force)
+        self._force_spin.setVisible(use_force)
+        self._youngs_label.setVisible(use_force)
+        self._youngs_spin.setVisible(use_force)
+        self._drive_info.setVisible(use_force)
     
     def is_enabled(self) -> bool:
         """Check if compression is enabled."""
@@ -174,8 +222,11 @@ class CompressionPanel(QWidget):
         return {
             'enabled': self._main_group.isChecked(),
             'mode': self._mode_combo.currentData(),
+            'drive_mode': self._drive_combo.currentData(),
             'axis': self._axis_combo.currentData(),
             'total_compression': self._compression_spin.value() / 100.0,
+            'force_newtons': self._force_spin.value(),
+            'youngs_modulus_gpa': self._youngs_spin.value(),
             'num_steps': self._steps_spin.value(),
             'poisson_ratio': self._poisson_spin.value(),
             'downsample_factor': self._downsample_spin.value(),
@@ -211,6 +262,23 @@ class CompressionPanel(QWidget):
         """Clear previous results."""
         self._results = []
         self._results_group.setVisible(False)
+
+    def reset_step_selection(self, *, emit_signal: bool = False) -> None:
+        """Reset step selection to default (Step 0) without dropping cached results."""
+        if not self._results:
+            self._step_slider.setValue(0)
+            self._step_label.setText("Step 0 / 0")
+            self._info_label.setText("Compression: 0%")
+            return
+
+        self._step_slider.blockSignals(True)
+        self._step_slider.setValue(0)
+        self._step_slider.blockSignals(False)
+        result = self._results[0]
+        self._step_label.setText(f"Step 0 / {len(self._results) - 1}")
+        self._info_label.setText(f"Compression: {result.compression_ratio * 100:.1f}%")
+        if emit_signal:
+            self.step_changed.emit(0, result.volume)
     
     def _on_step_changed(self, step_index: int):
         """Handle slider change - update viewer."""

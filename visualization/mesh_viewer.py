@@ -5,13 +5,14 @@ Provides 3D visualization for STL meshes and CT volumes using PyVista.
 """
 
 from typing import Optional
+import logging
 import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-    QPushButton, QComboBox, QLabel, QCheckBox
+    QPushButton, QComboBox, QLabel, QCheckBox, QLineEdit
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 try:
     import pyvista as pv
@@ -30,12 +31,16 @@ from .volume_viewer import VolumeViewer
 
 class MeshViewer(QWidget):
     """3D viewer for STL meshes and CT volumes."""
+    threshold_changed = Signal(float)
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
         self._viewer_state = VolumeViewer()
         self._plotter = None
+        self._current_volume_data: Optional[np.ndarray] = None
+        self._current_voxel_size: float = 1.0
+        self._threshold_value: float = 0.0
         
         self._setup_ui()
     
@@ -88,6 +93,86 @@ class MeshViewer(QWidget):
         controls_layout.addWidget(reset_btn)
         
         layout.addWidget(controls_group)
+
+        volume_controls_group = QGroupBox("Volume Controls")
+        volume_controls_layout = QHBoxLayout(volume_controls_group)
+        volume_controls_layout.addWidget(QLabel("Threshold:"))
+        self._threshold_edit = QLineEdit("0.0")
+        self._threshold_edit.setPlaceholderText("Enter threshold value")
+        self._threshold_edit.setToolTip("Isosurface threshold value (no fixed numeric limits).")
+        self._threshold_edit.editingFinished.connect(self._on_threshold_edited)
+        self._threshold_edit.setEnabled(False)
+        volume_controls_layout.addWidget(self._threshold_edit)
+        layout.addWidget(volume_controls_group)
+
+    @staticmethod
+    def _format_threshold(value: float) -> str:
+        return f"{value:.10g}"
+
+    @staticmethod
+    def _parse_threshold(value: str) -> Optional[float]:
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _set_threshold_value(self, value: float, *, emit_signal: bool) -> None:
+        self._threshold_value = float(value)
+        self._threshold_edit.setText(self._format_threshold(self._threshold_value))
+        if emit_signal:
+            self.threshold_changed.emit(self._threshold_value)
+
+    def _render_current_volume(self) -> None:
+        """Render currently loaded CT volume using the active threshold value."""
+        if not HAS_PYVISTA or self._plotter is None or self._current_volume_data is None:
+            return
+
+        # CTVolume convention is (Z, Y, X), while PyVista ImageData expects (X, Y, Z).
+        ct_data_zyx = self._current_volume_data
+        ct_data_xyz = np.transpose(ct_data_zyx, (2, 1, 0))
+        voxel_size = self._current_voxel_size
+        threshold = self._threshold_value
+        self._viewer_state.set_volume(ct_data_zyx, voxel_size=voxel_size, threshold=threshold)
+
+        # Clear previous actors
+        self._plotter.clear()
+        self._setup_lighting()  # Re-apply lighting after clear
+
+        # Create uniform grid
+        grid = pv.ImageData()
+        grid.dimensions = np.array(ct_data_xyz.shape) + 1
+        grid.spacing = (voxel_size, voxel_size, voxel_size)
+        grid.cell_data["values"] = ct_data_xyz.flatten(order="F")
+
+        # Extract isosurface
+        try:
+            contour = grid.contour([threshold])
+            if contour.n_points > 0:
+                contour.compute_normals(inplace=True)
+                self._plotter.add_mesh(
+                    contour,
+                    color='#E0E0E0',
+                    show_edges=False,
+                    lighting=True,
+                    smooth_shading=True,
+                    specular=0.5,
+                    specular_power=15,
+                    ambient=0.2,
+                    diffuse=0.8
+                )
+        except Exception:
+            self._plotter.add_volume(
+                grid,
+                scalars="values",
+                opacity="sigmoid",
+                cmap="bone"
+            )
+
+        self._plotter.reset_camera()
+        self._plotter.add_axes()
     
     def _setup_lighting(self) -> None:
         """Set up 3-point lighting for realistic rendering."""
@@ -145,6 +230,8 @@ class MeshViewer(QWidget):
             return
         
         self._viewer_state.set_mesh(mesh)
+        self._current_volume_data = None
+        self._threshold_edit.setEnabled(False)
         
         # Clear previous actors
         self._plotter.clear()
@@ -181,7 +268,14 @@ class MeshViewer(QWidget):
         self._plotter.reset_camera()
         self._plotter.add_axes()
     
-    def set_ct_volume(self, ct_data: np.ndarray, voxel_size: float, threshold: float = 0.0) -> None:
+    def set_ct_volume(
+        self,
+        ct_data: np.ndarray,
+        voxel_size: float,
+        threshold: float = 0.0,
+        *,
+        preserve_threshold: bool = False,
+    ) -> None:
         """
         Display CT volume as 3D isosurface.
         
@@ -192,48 +286,15 @@ class MeshViewer(QWidget):
         """
         if not HAS_PYVISTA or self._plotter is None:
             return
-        
-        self._viewer_state.set_volume(ct_data, voxel_size=voxel_size, threshold=threshold)
-        
-        # Clear previous actors
-        self._plotter.clear()
-        self._setup_lighting()  # Re-apply lighting after clear
-        
-        # Create uniform grid
-        grid = pv.ImageData()
-        grid.dimensions = np.array(ct_data.shape) + 1
-        grid.spacing = (voxel_size, voxel_size, voxel_size)
-        grid.cell_data["values"] = ct_data.flatten(order="F")
-        
-        # Extract isosurface
-        try:
-            contour = grid.contour([threshold])
-            if contour.n_points > 0:
-                # Compute normals for smooth shading
-                contour.compute_normals(inplace=True)
-                
-                self._plotter.add_mesh(
-                    contour,
-                    color='#E0E0E0',
-                    show_edges=False,
-                    lighting=True,
-                    smooth_shading=True,
-                    specular=0.5,
-                    specular_power=15,
-                    ambient=0.2,
-                    diffuse=0.8
-                )
-        except Exception:
-            # Fallback: show volume rendering
-            self._plotter.add_volume(
-                grid,
-                scalars="values",
-                opacity="sigmoid",
-                cmap="bone"
-            )
-        
-        self._plotter.reset_camera()
-        self._plotter.add_axes()
+
+        self._current_volume_data = ct_data
+        self._current_voxel_size = float(voxel_size)
+        self._threshold_edit.setEnabled(True)
+
+        if not preserve_threshold:
+            self._set_threshold_value(float(threshold), emit_signal=True)
+
+        self._render_current_volume()
     
     def _on_view_changed(self, view_name: str) -> None:
         """Handle view preset change."""
@@ -256,10 +317,70 @@ class MeshViewer(QWidget):
         if self._plotter is not None:
             self._plotter.reset_camera()
             self._view_combo.setCurrentText("Isometric")
+
+    def _on_threshold_edited(self) -> None:
+        """Apply user threshold input without imposing numeric limits."""
+        parsed = self._parse_threshold(self._threshold_edit.text())
+        if parsed is None:
+            self._threshold_edit.setText(self._format_threshold(self._threshold_value))
+            return
+
+        self._set_threshold_value(parsed, emit_signal=True)
+        if self._current_volume_data is not None:
+            self._render_current_volume()
     
     def clear(self) -> None:
         """Clear the 3D viewer."""
         if self._plotter is not None:
             self._plotter.clear()
             self._plotter.add_axes()
+        self._current_volume_data = None
+        self._threshold_edit.setEnabled(False)
         self._viewer_state.clear()
+
+    @property
+    def threshold(self) -> float:
+        """Get current threshold value."""
+        return self._threshold_value
+
+    def reset_display_state(self) -> None:
+        """Reset clip/selection style controls to defaults."""
+        self._view_combo.blockSignals(True)
+        self._view_combo.setCurrentText("Isometric")
+        self._view_combo.blockSignals(False)
+
+        self._edges_check.blockSignals(True)
+        self._edges_check.setChecked(False)
+        self._edges_check.blockSignals(False)
+        self._viewer_state.set_edges_visible(False)
+
+        self._set_threshold_value(0.0, emit_signal=True)
+
+    def cleanup(self) -> None:
+        """Release PyVista/VTK resources before application shutdown."""
+        plotter = self._plotter
+        self._plotter = None
+        if plotter is None:
+            return
+
+        try:
+            plotter.clear()
+        except Exception as exc:
+            logging.debug("Plotter clear during cleanup failed: %s", exc)
+
+        try:
+            interactor = getattr(plotter, "interactor", None)
+            if interactor is not None:
+                interactor.close()
+        except Exception as exc:
+            logging.debug("Plotter interactor close failed: %s", exc)
+
+        try:
+            plotter.close()
+        except Exception as exc:
+            logging.debug("Plotter close failed: %s", exc)
+
+    def closeEvent(self, event) -> None:
+        """Ensure native rendering resources are torn down with the widget."""
+        self.cleanup()
+        super().closeEvent(event)

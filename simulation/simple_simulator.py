@@ -132,7 +132,13 @@ class SimpleCTSimulator(
         """
         voxel_grid.validate()
 
-        current_volume = voxel_grid.data.astype(np.float32)
+        # VoxelGrid is treated as (X, Y, Z) in geometry/structure modules.
+        # Convert once to CT-standard (Z, Y, X) so CTVolume contract stays consistent
+        # with PhysicalCTSimulator and downstream viewers/exporters.
+        current_volume = np.transpose(
+            voxel_grid.data.astype(np.float32),
+            (2, 1, 0),
+        )
         
         # Projection angles
         theta = np.linspace(0., 180., self.num_projections, endpoint=False)

@@ -301,6 +301,12 @@ class AnnotationSet:
             "compression_ratio": float(self.compression_ratio),
             "voxel_size": float(self.voxel_size),
             "volume_shape": list(self.volume_shape),
+            "voxel_index_order": "XYZ_internal",
+            "ct_volume_shape_zyx": [
+                int(self.volume_shape[2]),
+                int(self.volume_shape[1]),
+                int(self.volume_shape[0]),
+            ],
             "origin": self.origin.tolist(),
             "num_voids": len(self.voids),
             "voids": [v.to_dict() for v in self.voids],
@@ -309,57 +315,60 @@ class AnnotationSet:
     def to_coco(self) -> Dict[str, Any]:
         """Convert to COCO object-detection format (per-slice 2D bboxes).
 
-        Produces annotations for axial slices (axis=0) where each void
-        intersects the slice plane, using the true per-slice intersection mask.
+        Produces annotations for axial slices in CT orientation (Z, Y, X),
+        derived from the exported label volume.
         """
-        images = []
-        annotations = []
-        ann_id = 1
-        nz, ny, nx = self.volume_shape
+        labels_zyx = self.generate_label_volume()
+        nz, ny, nx = labels_zyx.shape
 
-        for z in range(nz):
-            image_id = z + 1
-            images.append({
-                "id": image_id,
+        images = [
+            {
+                "id": z + 1,
                 "file_name": f"slice_{z:04d}.png",
                 "width": int(nx),
                 "height": int(ny),
-            })
+            }
+            for z in range(nz)
+        ]
 
-        for v in self.voids:
-            local = self._compute_void_local_mask(v)
-            if local is None:
+        shape_by_id = {int(v.id): v.shape for v in self.voids}
+        annotations = []
+        ann_id = 1
+
+        for z in range(nz):
+            slice_labels = labels_zyx[z]
+            present_ids = np.unique(slice_labels)
+            present_ids = present_ids[present_ids > 0]
+            if present_ids.size == 0:
                 continue
-            z0, y0, x0, mask = local
 
-            for local_z in range(mask.shape[0]):
-                slice_mask = mask[local_z]
-                if not np.any(slice_mask):
+            for void_id in present_ids.tolist():
+                mask = slice_labels == void_id
+                ys, xs = np.where(mask)
+                if ys.size == 0:
                     continue
 
-                ys, xs = np.where(slice_mask)
-                y_min = int(y0 + ys.min())
-                y_max = int(y0 + ys.max())
-                x_min = int(x0 + xs.min())
-                x_max = int(x0 + xs.max())
-                z = int(z0 + local_z)
-
-                # Inclusive discrete bounds -> +1
+                x_min = int(xs.min())
+                x_max = int(xs.max())
+                y_min = int(ys.min())
+                y_max = int(ys.max())
                 w = int(x_max - x_min + 1)
                 h = int(y_max - y_min + 1)
                 if w <= 0 or h <= 0:
                     continue
 
-                annotations.append({
-                    "id": ann_id,
-                    "image_id": z + 1,
-                    "category_id": 1,
-                    "bbox": [x_min, y_min, w, h],
-                    "area": w * h,
-                    "iscrowd": 0,
-                    "void_id": int(v.id),
-                    "void_shape": v.shape,
-                })
+                annotations.append(
+                    {
+                        "id": ann_id,
+                        "image_id": z + 1,
+                        "category_id": 1,
+                        "bbox": [x_min, y_min, w, h],
+                        "area": w * h,
+                        "iscrowd": 0,
+                        "void_id": int(void_id),
+                        "void_shape": shape_by_id.get(int(void_id), "void"),
+                    }
+                )
                 ann_id += 1
 
         return {
@@ -388,9 +397,11 @@ class AnnotationSet:
         """Generate a 3D label volume where each void has a unique integer ID.
 
         Returns:
-            int16 array of shape ``volume_shape`` with 0 = background.
+            int16 array in CT orientation ``(Z, Y, X)`` with 0 = background.
         """
-        labels = np.zeros(self.volume_shape, dtype=np.int16)
+        # Internal geometric operations use voxel index order (X, Y, Z).
+        # Exported CT products use (Z, Y, X), so transpose once at the end.
+        labels_xyz = np.zeros(self.volume_shape, dtype=np.int16)
 
         for v in self.voids:
             local = self._compute_void_local_mask(v)
@@ -401,9 +412,9 @@ class AnnotationSet:
             z1 = z0 + mask.shape[0]
             y1 = y0 + mask.shape[1]
             x1 = x0 + mask.shape[2]
-            labels[z0:z1, y0:y1, x0:x1][mask] = v.id
+            labels_xyz[z0:z1, y0:y1, x0:x1][mask] = v.id
 
-        return labels
+        return np.transpose(labels_xyz, (2, 1, 0))
 
     def save_label_volume(self, path: Path) -> None:
         """Save instance-segmentation label volume as .npy file."""

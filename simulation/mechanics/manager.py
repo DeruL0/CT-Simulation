@@ -26,11 +26,15 @@ except ImportError:
 class CompressionConfig:
     """Configuration for compression simulation."""
     # Simulation parameters
-    total_compression: float = 0.2  # 20% total compression
+    total_compression: float = 0.2  # 20% total compression (ratio mode)
     num_steps: int = 5  # Number of time steps
     poisson_ratio: float = 0.3  # Material Poisson ratio
     axis: str = 'Z'  # Compression axis: 'Z' (Top-Bottom), 'Y' (Front-Back), 'X' (Left-Right)
-    
+    drive_mode: str = "ratio"  # 'ratio' or 'force'
+    compression_force_n: float = 0.0  # Applied force in newtons (force mode)
+    youngs_modulus_pa: float = 1.0e9  # Equivalent Young's modulus (force mode)
+    max_force_compression: float = 0.5  # Safety cap for force-driven strain
+
     # Physics solver settings
     use_physics: bool = True  # Use elasticity solver vs simple affine
     downsample_factor: int = 4  # Physics grid downsample
@@ -154,6 +158,17 @@ class CompressionManager:
             axis_rotated = True
             logging.info(f"Rotated volume for Y-axis compression: {volume.shape} -> {current_volume.shape}")
         # Z axis: no rotation needed
+
+        total_compression = self._resolve_total_compression(
+            current_volume,
+            voxel_size,
+            config,
+        )
+        logging.info(
+            "Requested compression resolved to %.3f%% using %s mode",
+            total_compression * 100.0,
+            config.drive_mode,
+        )
         
         # Add initial state (step 0)
         initial_volume = current_volume.copy()
@@ -174,14 +189,14 @@ class CompressionManager:
         ))
         
         for step in range(1, config.num_steps + 1):
-            step_ratio = config.total_compression * step / config.num_steps
+            step_ratio = total_compression * step / config.num_steps
             
             if progress_callback:
                 overall_progress = (step - 1) / config.num_steps
                 progress_callback(overall_progress, f"Step {step}/{config.num_steps}")
             
             # Calculate incremental compression for this step
-            prev_ratio = config.total_compression * (step - 1) / config.num_steps
+            prev_ratio = total_compression * (step - 1) / config.num_steps
             incremental_ratio = step_ratio - prev_ratio
             
             # Apply compression (always on Z axis now)
@@ -243,6 +258,66 @@ class CompressionManager:
         
         return results
 
+    def _resolve_total_compression(
+        self,
+        volume: np.ndarray,
+        voxel_size: float,
+        config: CompressionConfig,
+    ) -> float:
+        """Resolve the total compression ratio from the selected drive mode."""
+        drive_mode = (config.drive_mode or "ratio").strip().lower()
+        if drive_mode == "force":
+            return self._force_to_compression_ratio(volume, voxel_size, config)
+        return float(np.clip(config.total_compression, 0.0, config.max_force_compression))
+
+    def _force_to_compression_ratio(
+        self,
+        volume: np.ndarray,
+        voxel_size: float,
+        config: CompressionConfig,
+    ) -> float:
+        """
+        Convert a compressive force into an equivalent uniaxial strain.
+
+        Uses sigma = F / A and epsilon = sigma / E with an area estimate derived
+        from the occupied voxel footprint orthogonal to the compression axis.
+        """
+        force_n = max(float(config.compression_force_n), 0.0)
+        youngs_modulus_pa = float(config.youngs_modulus_pa)
+        if force_n == 0.0:
+            logging.info("Force-driven compression disabled because force is 0 N")
+            return 0.0
+        if not np.isfinite(youngs_modulus_pa) or youngs_modulus_pa <= 0.0:
+            raise ValueError("Young's modulus must be a positive finite value in force mode.")
+
+        contact_area_m2 = self._estimate_contact_area_m2(volume, voxel_size)
+        stress_pa = force_n / contact_area_m2
+        strain = stress_pa / youngs_modulus_pa
+        compression_ratio = float(np.clip(strain, 0.0, config.max_force_compression))
+
+        logging.info(
+            "Force-driven compression: F=%.3f N, A=%.6e m^2, sigma=%.6e Pa, E=%.6e Pa, epsilon=%.6f, capped=%.6f",
+            force_n,
+            contact_area_m2,
+            stress_pa,
+            youngs_modulus_pa,
+            strain,
+            compression_ratio,
+        )
+        return compression_ratio
+
+    @staticmethod
+    def _estimate_contact_area_m2(volume: np.ndarray, voxel_size: float) -> float:
+        """Estimate compression contact area from the occupied footprint on the YX plane."""
+        solid_mask = np.asarray(volume) > 0.5
+        if not np.any(solid_mask):
+            raise ValueError("Cannot estimate compression area from an empty volume.")
+
+        footprint = np.any(solid_mask, axis=0)
+        voxel_area_m2 = (float(voxel_size) * 1e-3) ** 2
+        contact_area_m2 = float(np.count_nonzero(footprint)) * voxel_area_m2
+        return max(contact_area_m2, voxel_area_m2)
+
     @staticmethod
     def _mass_conserving_density_scale(scale_factors: np.ndarray) -> float:
         """Compute density multiplier from affine volume scaling (rho' = rho / det(S))."""
@@ -267,40 +342,109 @@ class CompressionManager:
         """
         new_voids = []
         origin = initial_annotations.origin.copy()
+        volume_shape_world = tuple(int(v) for v in self._rotated_to_world_vector(
+            np.asarray(volume_shape, dtype=np.float64),
+            axis,
+        ))
 
-        # Map axis name to scale index ordering
-        # The internal compression always happens on Z axis (index 0)
-        # cumulative_scale is (z, y, x) in the *rotated* frame
-        # Annotations are in world coords, so remap scale based on original axis
-        if axis == 'X':
-            scale_world = np.array([cumulative_scale[1], cumulative_scale[2], cumulative_scale[0]])  # z,y,x -> z,y,x_world
-        elif axis == 'Y':
-            scale_world = np.array([cumulative_scale[1], cumulative_scale[0], cumulative_scale[2]])
-        else:  # Z
-            scale_world = cumulative_scale.copy()
+        # The internal compression always happens on axis 0 of the rotated frame.
+        scale_world = self._rotated_to_world_vector(
+            np.asarray(cumulative_scale, dtype=np.float64),
+            axis,
+        )
 
         # Volume center for scaling reference
-        vol_center = origin + np.array(volume_shape) * voxel_size * 0.5
+        vol_center = origin + np.array(volume_shape_world, dtype=np.float64) * voxel_size * 0.5
 
         for v in initial_annotations.voids:
-            # Scale center relative to volume center
-            rel = v.center_mm - vol_center
-            new_center = vol_center + rel * scale_world
-
-            new_void = v.transformed(new_center, scale_world)
+            if disp_fields is not None:
+                center_voxel_world = (v.center_mm - origin) / voxel_size
+                center_voxel_rot = self._world_to_rotated_vector(center_voxel_world, axis)
+                disp_center_rot = self._sample_displacement_vector(disp_fields, center_voxel_rot)
+                displaced_center_rot = center_voxel_rot + disp_center_rot
+                displaced_center_world = self._rotated_to_world_vector(displaced_center_rot, axis)
+                displaced_center_world = np.clip(
+                    displaced_center_world,
+                    0.0,
+                    np.maximum(np.asarray(volume_shape_world, dtype=np.float64) - 1.0, 0.0),
+                )
+                local_scale_rot = self._estimate_local_scale(disp_fields, center_voxel_rot)
+                local_scale_world = self._rotated_to_world_vector(local_scale_rot, axis)
+                local_scale_world = np.clip(local_scale_world, 1e-3, 10.0)
+                new_center = origin + displaced_center_world * voxel_size
+                new_void = v.transformed(new_center, local_scale_world)
+            else:
+                # Scale center relative to volume center
+                rel = v.center_mm - vol_center
+                new_center = vol_center + rel * scale_world
+                new_void = v.transformed(new_center, scale_world)
             new_voids.append(new_void)
 
         ann_set = AnnotationSet(
             step_index=step_index,
             compression_ratio=compression_ratio,
             voxel_size=voxel_size,
-            volume_shape=volume_shape,
+            volume_shape=volume_shape_world,
             origin=origin,
             voids=new_voids,
         )
         ann_set.recompute_bboxes()
         logging.info(f"  Annotations transformed for step {step_index}: {len(new_voids)} voids")
         return ann_set
+
+    @staticmethod
+    def _world_to_rotated_vector(vector: np.ndarray, axis: str) -> np.ndarray:
+        """Map a vector from world/original volume order into the rotated solver order."""
+        v = np.asarray(vector, dtype=np.float64)
+        if axis == 'X':
+            return v[[2, 0, 1]]
+        if axis == 'Y':
+            return v[[1, 0, 2]]
+        return v.copy()
+
+    @staticmethod
+    def _rotated_to_world_vector(vector: np.ndarray, axis: str) -> np.ndarray:
+        """Map a vector from rotated solver order back into world/original volume order."""
+        v = np.asarray(vector, dtype=np.float64)
+        if axis == 'X':
+            return v[[1, 2, 0]]
+        if axis == 'Y':
+            return v[[1, 0, 2]]
+        return v.copy()
+
+    @staticmethod
+    def _sample_displacement_vector(
+        disp_fields: Tuple[np.ndarray, np.ndarray, np.ndarray],
+        point: np.ndarray,
+    ) -> np.ndarray:
+        """Sample the local displacement vector at a fractional voxel coordinate."""
+        from scipy import ndimage as sp_ndimage
+
+        coords = np.asarray(point, dtype=np.float64).reshape(3, 1)
+        sampled = [
+            float(sp_ndimage.map_coordinates(field, coords, order=1, mode='nearest')[0])
+            for field in disp_fields
+        ]
+        return np.asarray(sampled, dtype=np.float64)
+
+    def _estimate_local_scale(
+        self,
+        disp_fields: Tuple[np.ndarray, np.ndarray, np.ndarray],
+        point: np.ndarray,
+    ) -> np.ndarray:
+        """Estimate local axis scale from diagonal displacement gradients."""
+        point = np.asarray(point, dtype=np.float64)
+        local_scale = np.ones(3, dtype=np.float64)
+
+        for axis_index in range(3):
+            step = np.zeros(3, dtype=np.float64)
+            step[axis_index] = 1.0
+            disp_plus = self._sample_displacement_vector(disp_fields, point + step)
+            disp_minus = self._sample_displacement_vector(disp_fields, point - step)
+            grad_ii = 0.5 * (disp_plus[axis_index] - disp_minus[axis_index])
+            local_scale[axis_index] = 1.0 + grad_ii
+
+        return local_scale
     
     def _apply_physical_compression(
         self,

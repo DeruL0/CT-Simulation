@@ -92,11 +92,14 @@ def handle_simulation_finished(
     window._export_btn.setEnabled(True)
 
     if compression_results and len(compression_results) > 1:
+        final_result = compression_results[-1]
+        threshold = window._auto_isosurface_threshold(final_result.volume)
+        window._series_threshold = float(threshold)
+
         volumes = [r.volume for r in compression_results]
         window._viewer_panel.set_volume_series(volumes)
         window._compression_panel.set_results(compression_results)
 
-        final_result = compression_results[-1]
         final_ct = CTVolume(
             data=final_result.volume,
             voxel_size=final_result.voxel_size,
@@ -116,23 +119,26 @@ def handle_simulation_finished(
                 metadata=dict(ct_data.metadata, stage="compression_final"),
             )
         )
-        threshold = window._auto_isosurface_threshold(final_result.volume)
         window._viewer_3d_panel.set_ct_volume(
             final_result.volume,
             final_result.voxel_size,
             threshold=threshold,
+            preserve_threshold=False,
         )
         window._status_bar.showMessage(f"Simulation complete with {len(compression_results)} compression steps")
     else:
         window._data_manager.set_ct_data(ct_data)
+        window._viewer_panel.clear_volume_series()
         window._viewer_panel.set_volume(ct_volume.data)
         window._compression_panel.clear_results()
 
         threshold = window._auto_isosurface_threshold(ct_volume.data)
+        window._series_threshold = float(threshold)
         window._viewer_3d_panel.set_ct_volume(
             ct_volume.data,
             ct_volume.voxel_size,
             threshold=threshold,
+            preserve_threshold=False,
         )
         window._status_bar.showMessage(
             f"Simulation complete: {ct_volume.num_slices} slices, {ct_volume.voxel_size:.2f} mm/voxel"
